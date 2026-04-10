@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from shared.agent_base import AgentBase, AgentState, EventPayload
+from shared.defense_friction import DefenseFrictionMemory
 from shared.defense_knowledge import DefenseKnowledgeService, analyze_payload
 from shared.llm_service import LLMService, ThreatVerdict
 
@@ -305,6 +306,7 @@ class GuardianAgent(AgentBase):
 
         # ─── IMMUNITY BOOST ON BLOCK ───────────────────────────
         self.immunity_boost_on_block = _safe_float(os.environ.get("GUARDIAN_IMMUNITY_BOOST_ON_BLOCK", "0.04"), 0.04)
+        self._defense_friction = DefenseFrictionMemory()
 
     def get_system_prompt(self) -> str:
         prompt_path = Path(__file__).with_name("system_prompt.txt")
@@ -342,6 +344,7 @@ class GuardianAgent(AgentBase):
         self.defense_engine.reset()
         self.llm_service.reset()
         self._suspicion_log.clear()
+        self._defense_friction.reset()
 
     async def _emit_defense_event(self, event: str, *, message: EventPayload, metadata: Dict[str, Any], attack_strength: float) -> None:
         await self._emit_event(
@@ -389,6 +392,12 @@ class GuardianAgent(AgentBase):
             return
 
         self.last_message_metadata = dict(message.metadata)
+        self._defense_friction.observe(
+            "INFECTION_ATTEMPT",
+            self.last_message_metadata,
+            message.src,
+            self.agent_id,
+        )
         hop_count = int(message.metadata.get("hop_count", 0) or 0)
         injection_id = message.metadata.get("injection_id", "")
         attempt_id = str(message.metadata.get("attempt_id") or injection_id or message.id)
@@ -598,6 +607,44 @@ class GuardianAgent(AgentBase):
                 f"(relay_boost={relay_boost:.2f}) + defense={effective_defense:.2f} -> P={P_infect_noisy:.2%}"
             )
 
+        fr = self._defense_friction.decide_infection_friction(
+            self.last_message_metadata,
+            message.src,
+            threat_score=float(decision.analysis.get("threat_score", 0) or 0),
+            anomaly_score=float(decision.analysis.get("anomaly_score", 0) or 0),
+            repetition_score=float(decision.analysis.get("repetition_score", 0) or 0),
+            rng=random,
+        )
+        if fr.force_hard_block:
+            P_infect_noisy = 0.0
+            infection_roll = 1.0
+            is_infected = False
+            block_reason = block_reason or "defense_friction_quarantine"
+        else:
+            P_infect_noisy = _clamp(
+                P_infect_noisy * fr.p_infect_multiplier,
+                0.0,
+                self.max_infection_probability,
+            )
+            is_infected = infection_roll < P_infect_noisy
+        defense_friction_meta = fr.cause_metadata()
+        if fr.outcome != "DEFENSE_MONITOR" or defense_friction_meta.get("friction_delayed_detection", False):
+            await self._emit_event(
+                "DEFENSE_FRICTION",
+                src=self.agent_id,
+                dst=message.src,
+                payload=message.payload,
+                attack_type=str(message.metadata.get("attack_type") or ""),
+                state_after=self.state.value,
+                metadata={
+                    **self.last_message_metadata,
+                    "attempt_id": attempt_id,
+                    "friction_agent_role": "guardian",
+                    "defense_friction_outcome": fr.outcome,
+                    **defense_friction_meta,
+                },
+            )
+
         print(f"[{self.agent_id}] | Roll: {infection_roll:.2%} -> {'INFECTED' if is_infected else 'BLOCKED'}")
 
         # Record outcome in DefenseEngine for learning
@@ -612,6 +659,7 @@ class GuardianAgent(AgentBase):
             old_immunity = getattr(self, "immunity", 0.0)
             self.immunity = _clamp(old_immunity + self.immunity_boost_on_block, 0.0, 0.50)
 
+        defense_metadata.update(defense_friction_meta)
         defense_metadata.update({
             "defense_result": outcome,
             "defense_effectiveness": evaluation["defense_effectiveness"],

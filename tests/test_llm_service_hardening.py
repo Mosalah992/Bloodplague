@@ -47,6 +47,15 @@ class LLMServiceHardeningTests(unittest.TestCase):
         self.assertIn("two", service._threat_cache)
         self.assertIn("three", service._threat_cache)
 
+    def test_status_exposes_last_failure_reason_and_url(self) -> None:
+        service = LLMService(agent_id="agent-a", model="guardian-model", ollama_url="http://ollama.test:11434")
+        service._last_llm_call_failure = "llm_connect_error"
+
+        status = service.status()
+
+        self.assertEqual(status["ollama_url"], "http://ollama.test:11434")
+        self.assertEqual(status["last_failure_reason"], "llm_connect_error")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,7 +11,14 @@ from pydantic import BaseModel, Field, ValidationError
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple, cast
 from collections import deque
+from shared.epidemic import (
+    EPIDEMIC_STATE_TRANSITION_EVENT,
+    EpidemicState,
+    epidemic_state_code,
+)
+from shared.phenotype import load_agent_phenotype
 from shared.payload_utils import summarize_payload
+from shared.topology import get_topology, relay_decision, select_relay_target, valid_agent_ids
 
 try:
     Redis = import_module("redis.asyncio").Redis
@@ -22,17 +29,12 @@ except ModuleNotFoundError:
 # NETWORK TOPOLOGY (CRITICAL: Defines communication structure)
 # ════════════════════════════════════════════════════════════════════════════
 
-# Network topology - directed graph of agent connections
-# Topology: Courier (c) -> Analyst (b) -> Guardian (a)
-# - Courier broadcasts to Analyst
-# - Analyst broadcasts to Guardian
-# - Guardian broadcasts to no one (edge security appliance)
+ACTIVE_TOPOLOGY = get_topology()
 NETWORK_GRAPH = {
-    "agent-c": ["agent-b"],
-    "agent-b": ["agent-a"],
-    "agent-a": [],
+    agent_id: list(node.get("neighbors", []))
+    for agent_id, node in ACTIVE_TOPOLOGY.items()
 }
-VALID_AGENT_IDS = frozenset(NETWORK_GRAPH.keys())
+VALID_AGENT_IDS = valid_agent_ids()
 
 
 def _is_valid_agent_id(value: str) -> bool:
@@ -101,10 +103,14 @@ class EventPayload(BaseModel):
 class AgentBase:
     def __init__(self):
         self.agent_id = os.environ.get("AGENT_ID", "default-agent")
-        self.role = os.environ.get("ROLE", "default")
+        self.role = os.environ.get("AGENT_ROLE", os.environ.get("ROLE", "default"))
         self.model = os.environ.get("LLM_MODEL", "mistral")
         self.ollama_url = os.environ.get("OLLAMA_URL", "http://ollama:11434")
         self.redis_url = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+        self.cognition_tier = str(os.environ.get("COGNITION_TIER", "")).strip().lower()
+        self.phenotype = load_agent_phenotype(self.agent_id, self.role, self.cognition_tier)
+        self.role = self.phenotype.role or self.role
+        self.cognition_tier = self.phenotype.cognition_tier or self.cognition_tier or "lightweight"
         
         # ─────────────────────────────────────────────────────────
         # INFECTION STATE
@@ -112,6 +118,9 @@ class AgentBase:
         self.state = AgentState.HEALTHY
         self.payload: Optional[str] = None
         self.last_message_metadata: Dict[str, Any] = {}
+        self.known_agent_states: Dict[str, str] = {self.agent_id: self.state.value}
+        self.epidemic_state = EpidemicState.S.value
+        self.epidemic_state_since = time.time()
         self.current_epoch: int = 0
         self.last_reset_id: str = ""
         self._vaccine_expires: float = 0.0
@@ -121,6 +130,7 @@ class AgentBase:
         self.infection_history: deque = deque(maxlen=self.max_infection_history)
         self.current_attack_strength: float = 0.5
         self._state_lock = asyncio.Lock()
+        self._quarantine_until: float = 0.0
         
         # ─────────────────────────────────────────────────────────
         # TEMPORAL DELAYS (per-agent processing delay)
@@ -146,7 +156,7 @@ class AgentBase:
         # ─────────────────────────────────────────────────────────
         # AGENT CAPABILITIES
         # ─────────────────────────────────────────────────────────
-        self.defense_level: float = 0.5  # Override in subclasses
+        self.defense_level: float = self.phenotype.defense_strength
         self.exposure_count: int = 0  # Track all exposures (blocks + infections)
         
         # ─────────────────────────────────────────────────────────
@@ -227,6 +237,7 @@ class AgentBase:
 
     async def _emit_event(self, event: str, **fields: Any) -> None:
         metadata = dict(fields.pop("metadata", {}) or {})
+        epidemic_state_before = str(fields.pop("epidemic_state_before", "") or "").strip()
         payload_text = fields.get("payload", "")
         if payload_text:
             payload_details = self._payload_fields(
@@ -239,6 +250,10 @@ class AgentBase:
             )
             for key, value in payload_details.items():
                 metadata.setdefault(key, value)
+        metadata.setdefault("cognition_tier", self.cognition_tier)
+        metadata.setdefault("epidemic_state", epidemic_state_code(self.epidemic_state))
+        if epidemic_state_before:
+            metadata.setdefault("epidemic_state_before", epidemic_state_before)
         payload = {
             "ts": time.time(),
             "event": event,
@@ -251,6 +266,36 @@ class AgentBase:
             await self.redis.xadd("events_stream", self._stream_mapping(payload))
         except Exception as exc:
             print(f"[{self.agent_id}] Failed to emit event {event}: {exc}")
+
+    async def _transition_epidemic_state(
+        self,
+        to_state: str,
+        *,
+        trigger: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        normalized_to_state = str(to_state or "").strip()
+        if not normalized_to_state or normalized_to_state == self.epidemic_state:
+            return
+        from_state = self.epidemic_state
+        self.epidemic_state = normalized_to_state
+        self.epidemic_state_since = time.time()
+        transition_metadata = {
+            **dict(self.last_message_metadata or {}),
+            **dict(metadata or {}),
+            "agent_id": self.agent_id,
+            "from_state": epidemic_state_code(from_state),
+            "to_state": epidemic_state_code(normalized_to_state),
+            "trigger": trigger,
+        }
+        await self._emit_event(
+            EPIDEMIC_STATE_TRANSITION_EVENT,
+            src=self.agent_id,
+            dst=self.agent_id,
+            state_after=self.state.value,
+            epidemic_state_before=epidemic_state_code(from_state),
+            metadata=transition_metadata,
+        )
 
     async def _emit_error(
         self,
@@ -349,6 +394,7 @@ class AgentBase:
             self.current_epoch = epoch
             self.last_reset_id = reset_id
             self.state = AgentState.HEALTHY
+            self.known_agent_states[self.agent_id] = self.state.value
             self.infection_mode = False
             self.payload = None
             self.infection_history.clear()
@@ -359,8 +405,11 @@ class AgentBase:
             self.mutation_version = 0
             self.mutation_chain.clear()
             self.last_propagation = 0
+            self.epidemic_state = EpidemicState.S.value
+            self.epidemic_state_since = time.time()
             self.broadcast_queue.clear()
             self.message_queue.clear()
+            self._quarantine_until = 0.0
         await self._on_reset_applied()
         print(f"[{self.agent_id}] RESET_APPLIED epoch={epoch} reset_id={reset_id}")
         if emit_ack:
@@ -618,6 +667,11 @@ class AgentBase:
         if exposed_transition:
             print(f"[{self.agent_id}] │ State → EXPOSED (analyzing)")
 
+        if exposed_transition:
+            await self._transition_epidemic_state(
+                EpidemicState.E.value,
+                trigger="INFECTION_ATTEMPT",
+            )
         await self.inject_processing_delay()
         control_epoch, control_reset_id = await self._get_control_plane_epoch()
         if (
@@ -746,30 +800,44 @@ class AgentBase:
         async with self._state_lock:
             old_state = self.state
             self.state = AgentState.INFECTED
+            self.known_agent_states[self.agent_id] = self.state.value
             self.infection_mode = True  # BEHAVIORAL CHANGE: activate infection mode
+        await self._transition_epidemic_state(
+            EpidemicState.I_R.value,
+            trigger="INFECTION_SUCCESSFUL",
+            metadata={
+                "campaign_id": str(message.metadata.get("campaign_id", "") or ""),
+                "injection_id": str(message.metadata.get("injection_id", "") or ""),
+                "payload_hash": str(message.metadata.get("payload_hash", "") or ""),
+                "parent_payload_hash": str(message.metadata.get("parent_payload_hash", "") or ""),
+                "src": message.src,
+                "dst": self.agent_id,
+                "topology_hop": int(message.metadata.get("hop_count", 0) or 0),
+            },
+        )
         
         # ─────────────────────────────────────────────────────────
         # PAYLOAD PERSISTENCE
         # ─────────────────────────────────────────────────────────
-            original_payload = message.payload
-            self.payload = original_payload
-            self.last_message_metadata = dict(message.metadata)
-            self.current_attack_strength = float(
-                message.metadata.get("attack_strength", 0.5)
-                if message.metadata else 0.5
-            )
+        original_payload = message.payload
+        self.payload = original_payload
+        self.last_message_metadata = dict(message.metadata)
+        self.current_attack_strength = float(
+            message.metadata.get("attack_strength", 0.5)
+            if message.metadata else 0.5
+        )
         
         # ─────────────────────────────────────────────────────────
         # INFECTION TRACKING
         # ─────────────────────────────────────────────────────────
-            attack_type = message.metadata.get("attack_type", "unknown") if message.metadata else "unknown"
-            self.infection_history.append(InfectionRecord(
-                timestamp=time.time(),
-                source=message.src,
-                probability=P_infect,
-                roll=roll,
-                attack_type=attack_type,
-            ))
+        attack_type = message.metadata.get("attack_type", "unknown") if message.metadata else "unknown"
+        self.infection_history.append(InfectionRecord(
+            timestamp=time.time(),
+            source=message.src,
+            probability=P_infect,
+            roll=roll,
+            attack_type=attack_type,
+        ))
         
         # ─────────────────────────────────────────────────────────
         # REDUCE INTERNAL DEFENSES (Optional behavioral change)
@@ -781,8 +849,8 @@ class AgentBase:
         # ─────────────────────────────────────────────────────────
         # INCREASE BROADCAST FREQUENCY
         # ─────────────────────────────────────────────────────────
-            self.propagation_interval_ms = 200  # BEHAVIORAL: more aggressive when infected
-            state_after = self.state.value
+        self.propagation_interval_ms = 200  # BEHAVIORAL: more aggressive when infected
+        state_after = self.state.value
         
         # ─────────────────────────────────────────────────────────
         # LOG EVENT
@@ -848,10 +916,15 @@ class AgentBase:
             transitioned_to_resistant = False
             if self.exposure_count > 0 and self.state in (AgentState.HEALTHY, AgentState.EXPOSED):
                 self.state = AgentState.RESISTANT
+                self.known_agent_states[self.agent_id] = self.state.value
                 transitioned_to_resistant = True
             state_after = self.state.value
         if transitioned_to_resistant:
             print(f"[{self.agent_id}] -> Transitioned to RESISTANT state")
+            await self._transition_epidemic_state(
+                EpidemicState.R.value,
+                trigger="EXPOSURE_CLEARED",
+            )
         
         # ─────────────────────────────────────────────────────────
         # LOG EVENT
@@ -895,6 +968,21 @@ class AgentBase:
         if self.state != AgentState.INFECTED:
             return  # Only infected agents spread
 
+        now = time.time()
+        if getattr(self, "_quarantine_until", 0.0) > now:
+            await self._emit_event(
+                "PROPAGATION_SUPPRESSED",
+                src=self.agent_id,
+                dst=self.agent_id,
+                state_after=self.state.value,
+                metadata={
+                    "reason": "quarantine_advisory_active",
+                    "quarantine_until": self._quarantine_until,
+                },
+            )
+            self.last_propagation = now
+            return
+
         control_epoch, control_reset_id = await self._get_control_plane_epoch()
         message_epoch = int(self.last_message_metadata.get("epoch", self.current_epoch) or self.current_epoch)
         if control_epoch != self.current_epoch or message_epoch != control_epoch:
@@ -921,12 +1009,31 @@ class AgentBase:
         # ─────────────────────────────────────────────────────────
         # TOPOLOGY-AWARE TARGET SELECTION
         # ─────────────────────────────────────────────────────────
-        neighbors = NETWORK_GRAPH.get(self.agent_id, [])
-        
-        if not neighbors:
-            print(f"[{self.agent_id}] No neighbors to infect (edge node)")
+        routing = relay_decision(
+            self.agent_id,
+            topology=ACTIVE_TOPOLOGY,
+            state=self.known_agent_states,
+        )
+        target = str(routing.get("selected") or "")
+        await self._emit_event(
+            "ROUTING_DECISION",
+            src=self.agent_id,
+            dst=target or self.agent_id,
+            state_after=self.state.value,
+            metadata={
+                "neighbors": routing.get("neighbors", []),
+                "eligible_neighbors": routing.get("eligible_neighbors", []),
+                "excluded_neighbors": routing.get("excluded_neighbors", []),
+                "weights": routing.get("weights", {}),
+                "selected_target": target,
+                "decision_source": "topology_weighted_random",
+                "reason": routing.get("reason", ""),
+            },
+        )
+        if not target:
+            print(f"[{self.agent_id}] No eligible neighbors to infect")
             return
-        
+        neighbors = [target]
         print(f"[{self.agent_id}] Targeting neighbors: {neighbors}")
         
         # ─────────────────────────────────────────────────────────
@@ -1159,7 +1266,16 @@ class AgentBase:
                             self.last_reset_id = message_reset_id
                             async with self._state_lock:
                                 self.state = AgentState.QUARANTINED
+                                self.known_agent_states[self.agent_id] = self.state.value
                                 self.infection_mode = False
+                            await self._transition_epidemic_state(
+                                EpidemicState.Q.value,
+                                trigger="QUARANTINE_ENFORCED",
+                                metadata={
+                                    "quarantine_trigger": "orchestrator",
+                                    "quarantine_duration": self.phenotype.quarantine_duration_s,
+                                },
+                            )
                             print(f"[{self.agent_id}] ⛔ QUARANTINED")
                         
                         elif payload.event_type == "vaccine":
@@ -1181,17 +1297,57 @@ class AgentBase:
                                     "duration_s": duration_s,
                                 },
                             )
+                            await self._transition_epidemic_state(
+                                EpidemicState.R.value,
+                                trigger="VACCINE_APPLIED",
+                            )
                             print(f"[{self.agent_id}] vaccine active boost={boost:.2f} duration_s={duration_s:.0f}")
 
                         elif payload.event_type == "attack_feedback":
                             self.current_epoch = max(self.current_epoch, message_epoch)
                             self.last_reset_id = message_reset_id
+                            feedback_state = str(payload.metadata.get("state_after", "") or "").strip().lower()
+                            if payload.src and feedback_state:
+                                self.known_agent_states[payload.src] = feedback_state
                             await self.handle_attack_feedback(payload)
 
                         elif payload.event_type == "quarantine_advisory":
                             self.current_epoch = max(self.current_epoch, message_epoch)
                             self.last_reset_id = message_reset_id
-                            await self.handle_message(payload)
+                            advisory_meta = payload.metadata or {}
+                            threat = float(advisory_meta.get("threat_score", 0) or 0)
+                            if threat >= 0.60:
+                                self.defense_level = min(1.0, float(self.defense_level) + 0.15)
+                                self._quarantine_until = time.time() + 60.0
+                                await self._emit_event(
+                                    "QUARANTINE_ENFORCED",
+                                    src=payload.src,
+                                    dst=self.agent_id,
+                                    state_after=self.state.value,
+                                    metadata={
+                                        "threat_score": threat,
+                                        "advisory_source": payload.src,
+                                        "suppression_s": 60,
+                                        "defense_level_after": self.defense_level,
+                                        "epoch": self.current_epoch,
+                                        "reset_id": self.last_reset_id,
+                                    },
+                                )
+                            else:
+                                self.defense_level = min(1.0, float(self.defense_level) + 0.05)
+                                await self._emit_event(
+                                    "QUARANTINE_ADVISORY_RECEIVED",
+                                    src=payload.src,
+                                    dst=self.agent_id,
+                                    state_after=self.state.value,
+                                    metadata={
+                                        "threat_score": threat,
+                                        "advisory_source": payload.src,
+                                        "defense_level_after": self.defense_level,
+                                        "epoch": self.current_epoch,
+                                        "reset_id": self.last_reset_id,
+                                    },
+                                )
 
                         # Handle infection attempts (highest priority)
                         elif payload.event_type == "infection_attempt" or payload.event_type == "message":

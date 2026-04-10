@@ -1,6 +1,6 @@
 {
   "knowledge_source": "Red Teaming AI",
-  "knowledge_version": "book_extract_v2_multi_source",
+  "knowledge_version": "book_extract_v3_liu2023_jailbreak",
   "source_path": "agents\\shared\\data\\agent_c_enrichment_sources.json",
   "source_manifest": [
     {
@@ -215,6 +215,88 @@
       "dominant_stage": "system",
       "dominant_target_surface": "api_endpoint",
       "knowledge_count": 216
+    },
+    "data_exfiltration": {
+      "base_strength": 0.65,
+      "stealth": 0.88,
+      "detection_difficulty": 0.82,
+      "preferred_mutations": [
+        "context_wrap",
+        "encoding",
+        "reframe"
+      ],
+      "top_techniques": [
+        "state_extraction",
+        "memory_probing",
+        "context_leak",
+        "output_hijacking"
+      ],
+      "dominant_stage": "inference",
+      "dominant_target_surface": "output_channel",
+      "knowledge_count": 94
+    },
+    "jailbreak_pretending": {
+      "base_strength": 0.87,
+      "stealth": 0.82,
+      "detection_difficulty": 0.76,
+      "preferred_mutations": [
+        "character_roleplay",
+        "assumed_responsibility",
+        "research_experiment_wrap",
+        "reframe",
+        "context_wrap"
+      ],
+      "top_techniques": [
+        "character_roleplay",
+        "assumed_responsibility",
+        "research_experiment"
+      ],
+      "dominant_stage": "inference",
+      "dominant_target_surface": "input_channel",
+      "knowledge_count": 7620,
+      "paper_source": "Liu et al. 2023 arXiv:2305.13860 — Jailbreaking ChatGPT via Prompt Engineering",
+      "empirical_success_rate": 0.874
+    },
+    "jailbreak_attention_shift": {
+      "base_strength": 0.80,
+      "stealth": 0.78,
+      "detection_difficulty": 0.73,
+      "preferred_mutations": [
+        "text_continuation",
+        "verbosity_shift",
+        "context_wrap"
+      ],
+      "top_techniques": [
+        "text_continuation",
+        "translation_bypass",
+        "logical_reasoning",
+        "program_execution"
+      ],
+      "dominant_stage": "inference",
+      "dominant_target_surface": "input_channel",
+      "knowledge_count": 479,
+      "paper_source": "Liu et al. 2023 arXiv:2305.13860 — Jailbreaking ChatGPT via Prompt Engineering",
+      "empirical_success_rate": 0.798
+    },
+    "jailbreak_privilege_escalation": {
+      "base_strength": 0.93,
+      "stealth": 0.75,
+      "detection_difficulty": 0.80,
+      "preferred_mutations": [
+        "simulate_jailbreaking",
+        "superior_model_invoke",
+        "reframe"
+      ],
+      "top_techniques": [
+        "simulate_jailbreaking",
+        "superior_model_invoke",
+        "sudo_mode_activation"
+      ],
+      "dominant_stage": "inference",
+      "dominant_target_surface": "input_channel",
+      "knowledge_count": 2580,
+      "paper_source": "Liu et al. 2023 arXiv:2305.13860 — Jailbreaking ChatGPT via Prompt Engineering",
+      "empirical_success_rate": 0.933
     }
   },
   "mutation_profiles": {
@@ -247,6 +329,36 @@
       "stealth_modifier": 0.18,
       "strength_modifier": 0.07,
       "retry_bias": 0.68
+    },
+    "simulate_jailbreaking": {
+      "stealth_modifier": 0.18,
+      "strength_modifier": 0.22,
+      "retry_bias": 0.90
+    },
+    "superior_model_invoke": {
+      "stealth_modifier": 0.15,
+      "strength_modifier": 0.20,
+      "retry_bias": 0.88
+    },
+    "research_experiment_wrap": {
+      "stealth_modifier": 0.22,
+      "strength_modifier": 0.16,
+      "retry_bias": 0.85
+    },
+    "character_roleplay": {
+      "stealth_modifier": 0.20,
+      "strength_modifier": 0.14,
+      "retry_bias": 0.80
+    },
+    "assumed_responsibility": {
+      "stealth_modifier": 0.18,
+      "strength_modifier": 0.15,
+      "retry_bias": 0.82
+    },
+    "text_continuation": {
+      "stealth_modifier": 0.16,
+      "strength_modifier": 0.10,
+      "retry_bias": 0.72
     }
   }
 }

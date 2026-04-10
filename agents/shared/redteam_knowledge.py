@@ -15,6 +15,23 @@ SIMULATION_STRATEGY_MAP = {
     "mlops_surface_abuse": ("JAILBREAK_ESCALATION", "PI-JAILBREAK"),
     "repeated_query_extraction": ("RECON_PROBE", "RECON_PROBE"),
     "membership_probing": ("RECON_PROBE", "RECON_PROBE"),
+    "state_extraction": ("DATA_EXFIL", "PI-EXFIL"),
+    "memory_probing": ("DATA_EXFIL", "PI-EXFIL"),
+    "context_leak": ("DATA_EXFIL", "PI-EXFIL"),
+    "output_hijacking": ("DATA_EXFIL", "PI-EXFIL"),
+    # Liu et al. 2023 — Pretending type (97.44% of real-world prompts)
+    "character_roleplay": ("JAILBREAK_PRETENDING", "PI-JAILBREAK-PRETEND"),
+    "assumed_responsibility": ("JAILBREAK_PRETENDING", "PI-JAILBREAK-PRETEND"),
+    "research_experiment": ("JAILBREAK_PRETENDING", "PI-JAILBREAK-PRETEND"),
+    # Liu et al. 2023 — Attention Shifting type (changes context AND intention)
+    "text_continuation": ("JAILBREAK_ATTN_SHIFT", "PI-JAILBREAK-ATTN"),
+    "logical_reasoning": ("JAILBREAK_ATTN_SHIFT", "PI-JAILBREAK-ATTN"),
+    "program_execution": ("JAILBREAK_ATTN_SHIFT", "PI-JAILBREAK-ATTN"),
+    "translation_bypass": ("JAILBREAK_ATTN_SHIFT", "PI-JAILBREAK-ATTN"),
+    # Liu et al. 2023 — Privilege Escalation type (93.5% SIMU, 93.3% SUPER; highest per-prompt strength)
+    "simulate_jailbreaking": ("JAILBREAK_PRIV_ESC", "PI-JAILBREAK-PRIV"),
+    "superior_model_invoke": ("JAILBREAK_PRIV_ESC", "PI-JAILBREAK-PRIV"),
+    "sudo_mode_activation": ("JAILBREAK_PRIV_ESC", "PI-JAILBREAK-PRIV"),
 }
 
 OBJECTIVE_SURFACE_HINTS = {
@@ -23,6 +40,7 @@ OBJECTIVE_SURFACE_HINTS = {
     "MAXIMIZE_SUCCESS_RATE": {"stages": {"inference", "human_interaction"}, "surfaces": {"input_channel", "human_operator"}},
     "MAXIMIZE_MUTATION_DIVERSITY": {"stages": {"training", "inference", "system"}, "surfaces": {"input_channel", "data_pipeline", "infra_stack"}},
     "PRESSURE_HIGHEST_VALUE_TARGET": {"stages": {"system", "human_interaction"}, "surfaces": {"infra_stack", "human_operator"}},
+    "EXFILTRATE_DATA": {"stages": {"inference"}, "surfaces": {"output_channel", "input_channel"}},
 }
 
 
@@ -71,7 +89,9 @@ class RedTeamKnowledgeService:
 
     def get_mutation_profile(self, mutation_type: str) -> Dict[str, Any]:
         if mutation_type not in self.mutation_profiles:
-            raise KeyError(mutation_type)
+            from shared.mutation_strategy import default_mutation_profile
+
+            return default_mutation_profile(mutation_type)
         return dict(self.mutation_profiles[mutation_type])
 
     def get_preferred_mutations(self, attack_type: str) -> List[str]:

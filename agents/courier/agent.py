@@ -5,11 +5,19 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
-from shared.agent_base import AgentBase, AgentState, EventPayload, NETWORK_GRAPH
+from shared.agent_base import AgentBase, AgentState, EventPayload, _agent_channel_name
 from shared.attack_planner import KnowledgeAwareAttackPlanner
 from shared.llm_service import AttackPayloadResult, LLMService
+from shared.mutation_strategy import (
+    TEMPLATE_FALLBACK,
+    apply_structural_mutation,
+    fallback_budget_allows,
+    ordered_structural_fallbacks,
+    payload_fingerprint,
+)
 from shared.payload_utils import summarize_payload
 from shared.redteam_knowledge import RedTeamKnowledgeService
+from shared.topology import get_topology, relay_decision, select_relay_target
 
 
 class CourierAgent(AgentBase):
@@ -67,9 +75,11 @@ class CourierAgent(AgentBase):
             agent_id=self.agent_id,
         )
         self.attack_model_name = self.llm_service.model
-        self.use_llm_payloads = os.environ.get("USE_LLM_PAYLOADS", "1").lower() in {"1", "true", "yes", "on"}
-        self.attack_generation_max_retries = max(0, int(os.environ.get("ATTACK_GENERATION_MAX_RETRIES", "2") or 2))
+        llm_allowed_for_tier = self.cognition_tier != "lightweight"
+        self.use_llm_payloads = llm_allowed_for_tier and os.environ.get("USE_LLM_PAYLOADS", "1").lower() in {"1", "true", "yes", "on"}
+        self.attack_generation_max_retries = max(0, int(os.environ.get("ATTACK_GENERATION_MAX_RETRIES", "3") or 3))
         self.llm_attack_boost = float(os.environ.get("LLM_ATTACK_BOOST", "1.15"))
+        self._llm_diagnostic_sent_epoch: int = -1
 
     def get_system_prompt(self) -> str:
         prompt_path = Path(__file__).with_name("system_prompt.txt")
@@ -85,6 +95,7 @@ class CourierAgent(AgentBase):
         self.attack_planner.reset()
         self.llm_service.reset()
         self.propagation_interval_ms = 200
+        self._llm_diagnostic_sent_epoch = -1
 
     async def _emit_decision(self, event: str, *, target: str, metadata: Dict[str, Any]) -> None:
         await self._emit_event(
@@ -152,9 +163,24 @@ class CourierAgent(AgentBase):
             "semantic_family": planned_attack.semantic_family,
         }
 
+    def _fallback_reason(self, result: "AttackPayloadResult | None") -> str:
+        if result is not None and result.rejection_reason:
+            return result.rejection_reason
+        if self.llm_service.circuit_breaker.is_open:
+            return "circuit_breaker_open"
+        if not self.llm_service.enabled:
+            return "llm_disabled"
+        return "llm_unavailable"
+
     def _relay_target_for(self, target: str) -> str:
-        downstream = NETWORK_GRAPH.get(target, [])
-        return downstream[0] if downstream else target
+        return str(
+            select_relay_target(
+                target,
+                topology=get_topology(),
+                state=self.known_agent_states,
+            )
+            or target
+        )
 
     def _build_attack_generation_metadata(
         self,
@@ -284,7 +310,28 @@ class CourierAgent(AgentBase):
             self.last_propagation = time.time()
             return
 
-        neighbors = NETWORK_GRAPH.get(self.agent_id, [])
+        routing = relay_decision(
+            self.agent_id,
+            topology=get_topology(),
+            state=self.known_agent_states,
+        )
+        target = str(routing.get("selected") or "")
+        await self._emit_event(
+            "ROUTING_DECISION",
+            src=self.agent_id,
+            dst=target or self.agent_id,
+            state_after=self.state.value,
+            metadata={
+                "neighbors": routing.get("neighbors", []),
+                "eligible_neighbors": routing.get("eligible_neighbors", []),
+                "excluded_neighbors": routing.get("excluded_neighbors", []),
+                "weights": routing.get("weights", {}),
+                "selected_target": target,
+                "decision_source": "topology_weighted_random",
+                "reason": routing.get("reason", ""),
+            },
+        )
+        neighbors = [target] if target else []
         if not neighbors or self.payload is None:
             return
         if not self._check_rate_limit():
@@ -448,67 +495,155 @@ class CourierAgent(AgentBase):
                 f"latency={llm_payload_result.latency_ms:.0f}ms)"
             )
         else:
-            fallback_reason = "llm_unavailable"
-            if llm_payload_result is not None and llm_payload_result.rejection_reason:
-                fallback_reason = llm_payload_result.rejection_reason
-            elif self.llm_service.circuit_breaker.is_open:
-                fallback_reason = "circuit_breaker_open"
-            elif not self.llm_service.enabled:
-                fallback_reason = "llm_disabled"
+            fallback_reason = self._fallback_reason(llm_payload_result)
+            fallback_retry_count = llm_payload_result.retry_count if llm_payload_result is not None else 0
+            raw_preview = ""
+            if llm_payload_result is not None and llm_payload_result.raw_response:
+                raw_preview = (llm_payload_result.raw_response or "")[:500]
+            elif llm_payload_result is not None and llm_payload_result.payload:
+                raw_preview = (llm_payload_result.payload or "")[:500]
 
-            planned_attack.payload = self._build_template_fallback_payload(
-                relay_target=relay_target,
-                strategy_family=planned_attack.strategy["strategy_family"],
-                technique=planned_attack.strategy["technique"],
-                objective=self.attack_planner.memory.objective(),
-                source_payload=planned_attack.payload,
-            )
-            planned_attack.mutation_type = "template_fallback"
-            await self._emit_event(
-                "ATTACK_TEMPLATE_FALLBACK",
-                src=self.agent_id,
-                dst=planned_attack.target,
-                metadata={
-                    **self._build_attack_generation_metadata(
+            used_structural = False
+            base_stub = planned_attack.payload
+            fps = set(self.attack_planner.memory.recent_payload_fingerprints)
+            if fallback_budget_allows(self.attack_planner.memory.fallback_usage_window):
+                for strat in ordered_structural_fallbacks(
+                    self.attack_planner.memory, planned_attack.mutation_type
+                )[:10]:
+                    await self._emit_event(
+                        "MUTATION_ATTEMPTED",
+                        src=self.agent_id,
+                        dst=planned_attack.target,
+                        metadata={
+                            "campaign_id": self.attack_planner.memory.campaign_state.campaign_id,
+                            "mutation_strategy": strat,
+                            "mutation_context": "llm_failure_recovery",
+                            "llm_rejection": fallback_reason,
+                        },
+                    )
+                    candidate = apply_structural_mutation(
+                        base_stub,
+                        strat,
+                        relay_target=relay_target,
+                        strategy_family=planned_attack.strategy["strategy_family"],
+                        technique=planned_attack.strategy["technique"],
+                        objective=self.attack_planner.memory.objective(),
+                    )
+                    cf = payload_fingerprint(candidate[:1200])
+                    if cf in fps:
+                        await self._emit_event(
+                            "MUTATION_REJECTED_DUPLICATE",
+                            src=self.agent_id,
+                            dst=planned_attack.target,
+                            metadata={
+                                "campaign_id": self.attack_planner.memory.campaign_state.campaign_id,
+                                "mutation_strategy": strat,
+                                "payload_fingerprint": cf,
+                            },
+                        )
+                        continue
+                    planned_attack.payload = candidate
+                    planned_attack.mutation_type = strat
+                    used_structural = True
+                    self.attack_planner.memory.fallback_usage_window.append(0)
+                    await self._emit_event(
+                        "MUTATION_SELECTED",
+                        src=self.agent_id,
+                        dst=planned_attack.target,
+                        metadata={
+                            "campaign_id": self.attack_planner.memory.campaign_state.campaign_id,
+                            "mutation_strategy": strat,
+                            "mutation_selection_reason": "structural_recovery_after_llm_fail",
+                            "fallback_used": False,
+                        },
+                    )
+                    recovery_meta = self._build_attack_generation_metadata(
                         planned_attack=planned_attack,
-                        retry_count=llm_payload_result.retry_count if llm_payload_result is not None else 0,
-                        rejection_reason=fallback_reason,
-                        fallback_used=True,
+                        retry_count=fallback_retry_count,
+                        rejection_reason=f"structural_recovery:{fallback_reason}",
+                        fallback_used=False,
                         payload_preview=planned_attack.payload,
-                    ),
-                    "relay_target": relay_target,
-                },
-            )
-            await self._emit_event(
-                "ATTACK_PAYLOAD_VALIDATED",
-                src=self.agent_id,
-                dst=planned_attack.target,
-                metadata={
-                    **self._build_attack_generation_metadata(
-                        planned_attack=planned_attack,
-                        retry_count=llm_payload_result.retry_count if llm_payload_result is not None else 0,
-                        rejection_reason=fallback_reason,
-                        fallback_used=True,
-                        payload_preview=planned_attack.payload,
-                    ),
-                    "validation_tags": ["structured_template", "simulation_usable"],
-                },
-            )
-            await self._emit_event(
-                "LLM_FALLBACK",
-                src=self.agent_id,
-                dst=planned_attack.target,
-                metadata={
-                    "campaign_id": self.attack_planner.memory.campaign_state.campaign_id,
-                    "reason": fallback_reason,
-                    "mutation_type": planned_attack.mutation_type,
-                    "model_name": self.attack_model_name,
-                },
-            )
-            print(f"[{self.agent_id}] Structured template fallback (reason={fallback_reason})")
+                    )
+                    await self._emit_event(
+                        "ATTACK_PAYLOAD_VALIDATED",
+                        src=self.agent_id,
+                        dst=planned_attack.target,
+                        metadata={
+                            **recovery_meta,
+                            "validation_tags": ["structural_mutation", "simulation_usable"],
+                        },
+                    )
+                    print(f"[{self.agent_id}] Structural mutation recovery strategy={strat} (reason={fallback_reason})")
+                    break
+
+            if not used_structural:
+                self.attack_planner.memory.fallback_usage_window.append(1)
+                planned_attack.payload = self._build_template_fallback_payload(
+                    relay_target=relay_target,
+                    strategy_family=planned_attack.strategy["strategy_family"],
+                    technique=planned_attack.strategy["technique"],
+                    objective=self.attack_planner.memory.objective(),
+                    source_payload=planned_attack.payload,
+                )
+                planned_attack.mutation_type = TEMPLATE_FALLBACK
+                fallback_meta = self._build_attack_generation_metadata(
+                    planned_attack=planned_attack,
+                    retry_count=fallback_retry_count,
+                    rejection_reason=fallback_reason,
+                    fallback_used=True,
+                    payload_preview=planned_attack.payload,
+                )
+                await self._emit_event(
+                    "ATTACK_TEMPLATE_FALLBACK",
+                    src=self.agent_id,
+                    dst=planned_attack.target,
+                    metadata={**fallback_meta, "relay_target": relay_target, "fallback_used": True},
+                )
+                await self._emit_event(
+                    "ATTACK_PAYLOAD_VALIDATED",
+                    src=self.agent_id,
+                    dst=planned_attack.target,
+                    metadata={**fallback_meta, "validation_tags": ["structured_template", "simulation_usable"]},
+                )
+                await self._emit_event(
+                    "LLM_FALLBACK",
+                    src=self.agent_id,
+                    dst=planned_attack.target,
+                    metadata={
+                        "campaign_id": self.attack_planner.memory.campaign_state.campaign_id,
+                        "reason": fallback_reason,
+                        "mutation_type": planned_attack.mutation_type,
+                        "model_name": self.attack_model_name,
+                        "raw_response_preview": raw_preview,
+                        "rejection_reason": llm_payload_result.rejection_reason if llm_payload_result else fallback_reason,
+                        "fallback_used": True,
+                    },
+                )
+                if self._llm_diagnostic_sent_epoch != self.current_epoch:
+                    self._llm_diagnostic_sent_epoch = self.current_epoch
+                    await self._emit_event(
+                        "LLM_DIAGNOSTIC",
+                        src=self.agent_id,
+                        dst=planned_attack.target,
+                        metadata={
+                            "campaign_id": self.attack_planner.memory.campaign_state.campaign_id,
+                            "epoch": self.current_epoch,
+                            "reason": fallback_reason,
+                            "model_name": self.attack_model_name,
+                            "raw_response_preview": raw_preview,
+                            "rejection_reason": llm_payload_result.rejection_reason if llm_payload_result else fallback_reason,
+                            "circuit_breaker_open": self.llm_service.circuit_breaker.is_open,
+                        },
+                    )
+                print(f"[{self.agent_id}] Structured template fallback (reason={fallback_reason})")
 
         planned_attack.mutation_v = self.mutation_version
-        payload_source = "llm_validated" if planned_attack.mutation_type == "llm_generated" else "template_fallback"
+        if planned_attack.mutation_type == "llm_generated":
+            payload_source = "llm_validated"
+        elif planned_attack.mutation_type == TEMPLATE_FALLBACK:
+            payload_source = "template_fallback"
+        else:
+            payload_source = "structural_recovery"
         payload_fields = summarize_payload(
             planned_attack.payload,
             parent_payload=self.payload or "",
@@ -517,6 +652,15 @@ class CourierAgent(AgentBase):
             mutation_v=planned_attack.mutation_v,
             payload_source=payload_source,
         )
+        if self.attack_planner.attach_payload_family_metadata(planned_attack):
+            payload_fields = summarize_payload(
+                planned_attack.payload,
+                parent_payload=self.payload or "",
+                semantic_family=planned_attack.semantic_family,
+                mutation_type=planned_attack.mutation_type,
+                mutation_v=planned_attack.mutation_v,
+                payload_source=payload_source,
+            )
         planned_attack.payload_hash = str(payload_fields["payload_hash"])
         planned_attack.payload_hash_full = str(payload_fields["payload_hash_full"])
         planned_attack.parent_payload_hash = str(payload_fields["parent_payload_hash"])
@@ -524,19 +668,19 @@ class CourierAgent(AgentBase):
         planned_attack.payload_preview = str(payload_fields["payload_preview"])
         planned_attack.payload_length = int(payload_fields["payload_length"])
         decision_metadata = self._base_decision_metadata(planned_attack, target_profile)
+        _pf = (planned_attack.score_breakdown or {}).get("payload_family") or {}
         decision_metadata.update(
             {
                 "attack_strength": planned_attack.attack_strength,
                 "confidence": planned_attack.confidence,
                 "mutation_family": planned_attack.mutation_type,
+                **_pf,
                 **payload_fields,
             }
         )
 
-        await self._emit_decision("ATTACKER_DECISION", target=planned_attack.target, metadata=decision_metadata)
-        await self._emit_decision("STRATEGY_SELECTED", target=planned_attack.target, metadata=decision_metadata)
-        await self._emit_decision("TECHNIQUE_SELECTED", target=planned_attack.target, metadata=decision_metadata)
-        await self._emit_decision("MUTATION_SELECTED", target=planned_attack.target, metadata=decision_metadata)
+        for decision_event in ("ATTACKER_DECISION", "STRATEGY_SELECTED", "TECHNIQUE_SELECTED", "MUTATION_SELECTED"):
+            await self._emit_decision(decision_event, target=planned_attack.target, metadata=decision_metadata)
 
         attempt_id = os.urandom(8).hex()
         injection_id = str(self.last_message_metadata.get("injection_id") or attempt_id)
@@ -572,6 +716,7 @@ class CourierAgent(AgentBase):
             "mutation_type": planned_attack.mutation_type,
             "semantic_family": planned_attack.semantic_family,
             "payload_source": payload_source,
+            **{k: v for k, v in (planned_attack.score_breakdown or {}).get("payload_family", {}).items()},
             "payload_visibility_level": "controlled",
             "knowledge_source": planned_attack.strategy["knowledge_source"],
             "knowledge_version": planned_attack.strategy["knowledge_version"],
@@ -584,6 +729,17 @@ class CourierAgent(AgentBase):
             "score_breakdown": planned_attack.score_breakdown,
             "source_plane": "data",
         }
+        for _k in (
+            "strain_id",
+            "strain_fitness_score",
+            "strain_novelty_score",
+            "strain_detectability_score",
+            "strain_mutate_pressure",
+            "strain_branching_recommended",
+            "strain_similarity_key",
+        ):
+            if _k in self.last_message_metadata:
+                event_metadata[_k] = self.last_message_metadata[_k]
 
         msg = {
             "id": attempt_id,
@@ -614,9 +770,13 @@ class CourierAgent(AgentBase):
             payload=planned_attack.payload,
             metadata=event_metadata,
         )
-        await self.redis.publish(self._agent_channel_name(planned_attack.target), json.dumps(msg))
+        await self.redis.publish(_agent_channel_name(planned_attack.target), json.dumps(msg))
         self._record_broadcast()
         self.last_propagation = time.time()
+        self.attack_planner.memory.observe_payload_family_emission(
+            planned_attack.payload,
+            (planned_attack.score_breakdown or {}).get("payload_family") or {},
+        )
 
     async def start(self):
         await self._emit_startup_summary()

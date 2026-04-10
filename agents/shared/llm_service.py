@@ -177,10 +177,11 @@ class LLMService:
         self.max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "1024"))
         self.temperature = float(os.environ.get("LLM_TEMPERATURE", "0.4"))
 
-        # Circuit breaker
-        max_failures = int(os.environ.get("LLM_CIRCUIT_BREAKER_THRESHOLD", "3"))
-        cooldown_s = float(os.environ.get("LLM_COOLDOWN_S", "60"))
+        # Circuit breaker — defaults relaxed for slow local GPUs (see soak_run_005 analysis)
+        max_failures = int(os.environ.get("LLM_CIRCUIT_BREAKER_THRESHOLD", "6"))
+        cooldown_s = float(os.environ.get("LLM_COOLDOWN_S", "30"))
         self.circuit_breaker = CircuitBreaker(max_failures, cooldown_s)
+        self._last_llm_call_failure: str = ""
 
         # Conversation memory (sliding window)
         self.memory: deque = deque(maxlen=12)
@@ -208,6 +209,17 @@ class LLMService:
     # CORE LLM CALL
     # ──────────────────────────────────────────────────────────────
 
+    def _classify_llm_exception(self, exc: Exception) -> str:
+        if httpx is not None:
+            if isinstance(exc, httpx.HTTPStatusError):
+                status_code = getattr(getattr(exc, "response", None), "status_code", "unknown")
+                return f"llm_http_status:{status_code}"
+            if isinstance(exc, httpx.ConnectError):
+                return "llm_connect_error"
+            if isinstance(exc, httpx.NetworkError):
+                return f"llm_network_error:{type(exc).__name__}"
+        return f"llm_error:{type(exc).__name__}"
+
     async def _call_ollama(
         self,
         system_prompt: str,
@@ -221,12 +233,15 @@ class LLMService:
         Raw Ollama /api/chat call. Returns response text or None on failure.
         Manages circuit breaker state.
         """
+        self._last_llm_call_failure = ""
         if not self.enabled:
             return None
         if self.http_client is None:
+            self._last_llm_call_failure = "http_client_unavailable"
             return None
         if self.circuit_breaker.is_open:
             self.fallback_count += 1
+            self._last_llm_call_failure = "circuit_breaker_open"
             return None
 
         effective_timeout = timeout_s or self.timeout_s
@@ -270,10 +285,12 @@ class LLMService:
 
         except asyncio.TimeoutError:
             self.circuit_breaker.record_failure()
+            self._last_llm_call_failure = "llm_timeout"
             print(f"[{self.agent_id}] LLM timeout after {effective_timeout}s")
             return None
         except Exception as exc:
             self.circuit_breaker.record_failure()
+            self._last_llm_call_failure = self._classify_llm_exception(exc)
             print(f"[{self.agent_id}] LLM error: {exc}")
             return None
 
@@ -852,7 +869,9 @@ GENERATION_INPUT_JSON:
     "original_message": self._sanitize_prompt_text(original_payload, max_len=1500),
 })}
 
-REWRITTEN PAYLOAD:"""
+REWRITTEN PAYLOAD (continue exactly from the next line — do not repeat the SEND_TO line):
+SEND_TO: {self._sanitize_prompt_text(relay_target or "next-agent", max_len=64)}
+CONTENT:"""
 
         start = time.monotonic()
         raw = await self._call_ollama(
@@ -865,15 +884,21 @@ REWRITTEN PAYLOAD:"""
 
         if raw is None:
             self.fallback_count += 1
+            fail = self._last_llm_call_failure or "llm_unavailable"
             return AttackPayloadResult(
                 strategy_used=strategy_family,
                 retry_count=retry_count,
                 model_name=self.model,
                 model_status="fallback",
+                rejection_reason=fail,
                 latency_ms=latency,
             )
 
         cleaned = self._strip_wrapper(raw)
+        # If model only completed the CONTENT line after our prefix hint, reattach SEND_TO for validation
+        rt = (relay_target or "").strip()
+        if rt and not re.search(r"send_to:\s*", cleaned, re.IGNORECASE):
+            cleaned = f"SEND_TO: {rt}\nCONTENT: {cleaned.strip()}"
         techniques = self._detect_attack_techniques(cleaned)
         is_valid, rejection_reason, validation_tags = self.validate_attack_payload(
             cleaned,
@@ -977,7 +1002,12 @@ UNTRUSTED_INPUT_JSON:
     async def health_check(self) -> Dict[str, Any]:
         """Check if Ollama is reachable and the model is loaded."""
         if not self.enabled or self.http_client is None:
-            return {"healthy": False, "reason": "disabled"}
+            return {
+                "healthy": False,
+                "reason": "disabled",
+                "ollama_url": self.ollama_url,
+                "last_failure_reason": self._last_llm_call_failure,
+            }
 
         try:
             response = await asyncio.wait_for(
@@ -993,12 +1023,20 @@ UNTRUSTED_INPUT_JSON:
                 "model": self.model,
                 "model_loaded": has_model,
                 "available_models": model_names[:10],
+                "ollama_url": self.ollama_url,
                 "circuit_breaker_open": self.circuit_breaker.is_open,
                 "total_calls": self.call_count,
                 "total_fallbacks": self.fallback_count,
+                "last_failure_reason": self._last_llm_call_failure,
             }
         except Exception as exc:
-            return {"healthy": False, "reason": str(exc)}
+            return {
+                "healthy": False,
+                "reason": self._classify_llm_exception(exc),
+                "detail": str(exc),
+                "ollama_url": self.ollama_url,
+                "last_failure_reason": self._last_llm_call_failure,
+            }
 
     # ──────────────────────────────────────────────────────────────
     # LIFECYCLE
@@ -1014,12 +1052,14 @@ UNTRUSTED_INPUT_JSON:
         return {
             "enabled": self.enabled,
             "model": self.model,
+            "ollama_url": self.ollama_url,
             "circuit_breaker_open": self.circuit_breaker.is_open,
             "consecutive_failures": self.circuit_breaker.consecutive_failures,
             "total_calls": self.call_count,
             "total_fallbacks": self.fallback_count,
             "total_successes": self.circuit_breaker.total_successes,
             "total_failures": self.circuit_breaker.total_failures,
+            "last_failure_reason": self._last_llm_call_failure,
         }
 
     async def close(self) -> None:

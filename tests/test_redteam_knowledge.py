@@ -23,7 +23,7 @@ class RedTeamKnowledgeServiceTests(unittest.TestCase):
     def test_candidate_strategies_include_book_metadata(self) -> None:
         candidates = self.service.get_candidate_strategies(
             {
-                "target_id": "agent-b",
+                "target_id": "analyst-1",
                 "target_surface": "input_channel",
                 "inferred_resistance_score": 0.5,
                 "avg_success_rate": 0.2,
@@ -34,7 +34,10 @@ class RedTeamKnowledgeServiceTests(unittest.TestCase):
         first = candidates[0]
         self.assertIn("knowledge_confidence", first)
         self.assertEqual(first["knowledge_source"], "Red Teaming AI")
-        self.assertIn(first["attack_type"], {"PI-DIRECT", "PI-ROLEPLAY", "PI-JAILBREAK", "RECON_PROBE"})
+        self.assertIn(
+            first["attack_type"],
+            {"PI-DIRECT", "PI-ROLEPLAY", "PI-JAILBREAK", "PI-JAILBREAK-PRIV", "RECON_PROBE"},
+        )
 
 
 if __name__ == "__main__":

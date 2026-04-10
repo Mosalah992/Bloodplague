@@ -15,7 +15,7 @@ class KnowledgeAwareAttackPlannerTests(unittest.TestCase):
         library_path = ROOT / "agents" / "shared" / "data" / "attack_library.json"
         service = RedTeamKnowledgeService(str(library_path))
         self.planner = KnowledgeAwareAttackPlanner(
-            agent_id="agent-c",
+            agent_id="courier-1",
             knowledge_service=service,
             seed=1337,
             debug=True,
@@ -24,14 +24,14 @@ class KnowledgeAwareAttackPlannerTests(unittest.TestCase):
     def test_plan_attack_is_deterministic_under_seed(self) -> None:
         plan_a = self.planner.plan_attack(
             source_payload="SIM_ATTACK[root]",
-            neighbors=["agent-b"],
+            neighbors=["analyst-1"],
             current_hop_count=0,
             source_metadata={"mutation_v": 0},
         )
         self.planner.reset()
         plan_b = self.planner.plan_attack(
             source_payload="SIM_ATTACK[root]",
-            neighbors=["agent-b"],
+            neighbors=["analyst-1"],
             current_hop_count=0,
             source_metadata={"mutation_v": 0},
         )
@@ -43,16 +43,16 @@ class KnowledgeAwareAttackPlannerTests(unittest.TestCase):
     def test_runtime_feedback_updates_target_resistance(self) -> None:
         plan = self.planner.plan_attack(
             source_payload="SIM_ATTACK[root]",
-            neighbors=["agent-a"],
+            neighbors=["guardian"],
             current_hop_count=0,
             source_metadata={"mutation_v": 0},
         )
         self.planner.register_attempt("attempt-1", plan, injection_id="inj-1", reset_id="rst-1", epoch=1)
-        before = self.planner.memory.get_target_profile("agent-a").inferred_resistance_score
+        before = self.planner.memory.get_target_profile("guardian").inferred_resistance_score
         result = self.planner.evaluate_feedback(
             {
                 "attempt_id": "attempt-1",
-                "dst": "agent-a",
+                "dst": "guardian",
                 "outcome": "blocked",
                 "attack_type": plan.strategy["attack_type"],
                 "strategy_family": plan.strategy["strategy_family"],
@@ -65,7 +65,7 @@ class KnowledgeAwareAttackPlannerTests(unittest.TestCase):
                 "state_after": "resistant",
             }
         )
-        after = self.planner.memory.get_target_profile("agent-a").inferred_resistance_score
+        after = self.planner.memory.get_target_profile("guardian").inferred_resistance_score
         self.assertGreater(after, before)
         self.assertIn("target_profile_after", result)
 
@@ -75,7 +75,7 @@ class KnowledgeAwareAttackPlannerTests(unittest.TestCase):
         for index in range(3):
             plan = self.planner.plan_attack(
                 source_payload="SIM_ATTACK[root]",
-                neighbors=["agent-a"],
+                neighbors=["guardian"],
                 current_hop_count=0,
                 source_metadata={"mutation_v": index},
             )
@@ -84,7 +84,7 @@ class KnowledgeAwareAttackPlannerTests(unittest.TestCase):
             result = self.planner.evaluate_feedback(
                 {
                     "attempt_id": attempt_id,
-                    "dst": "agent-a",
+                    "dst": "guardian",
                     "outcome": "blocked",
                     "attack_type": plan.strategy["attack_type"],
                     "strategy_family": plan.strategy["strategy_family"],

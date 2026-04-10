@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from shared.topology import get_neighbors
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # KILL CHAIN STAGES
@@ -79,8 +81,15 @@ EVENT_TO_KILL_CHAIN_STAGE: Dict[str, str] = {
     "DEFENSE_ADAPTED": KillChainStage.DEFENSE_INTERACTION.value,
     "LLM_THREAT_ANALYSIS": KillChainStage.DEFENSE_INTERACTION.value,
     "QUARANTINE_ADVISORY_SENT": KillChainStage.DEFENSE_INTERACTION.value,
+    "QUARANTINE_ENFORCED": KillChainStage.DEFENSE_INTERACTION.value,
     "PROPAGATION_SUPPRESSED": KillChainStage.DEFENSE_INTERACTION.value,
     "INFECTION_SUCCESSFUL": KillChainStage.COMPROMISE.value,
+    "EPIDEMIC_STATE_TRANSITION": KillChainStage.DELIVERY.value,
+    "EXPOSURE_DECAYED": KillChainStage.EXPLOITATION.value,
+    "EXPOSURE_CLEARED": KillChainStage.DEFENSE_INTERACTION.value,
+    "QUARANTINE_EXPIRED": KillChainStage.DEFENSE_INTERACTION.value,
+    "RESISTANCE_DECAYED": KillChainStage.DETECTION.value,
+    "VACCINE_APPLIED": KillChainStage.DETECTION.value,
     "HYBRID_DECISION_MADE": KillChainStage.EXPLOITATION.value,
     "ATTACK_RESULT_EVALUATED": KillChainStage.EXPLOITATION.value,
     "CAMPAIGN_ADAPTED": KillChainStage.DELIVERY.value,
@@ -89,17 +98,25 @@ EVENT_TO_KILL_CHAIN_STAGE: Dict[str, str] = {
     "C2_BEACON": KillChainStage.BEACON.value,
     "C2_CHANNEL_ESTABLISHED": KillChainStage.BEACON.value,
     "C2_CHANNEL_FAILED": KillChainStage.BEACON.value,
+    "C2_BEACON_FAILED": KillChainStage.BEACON.value,
     "BEACON_BLOCKED": KillChainStage.BEACON.value,
     "C2_TASK": KillChainStage.TASKING.value,
+    "C2_TASK_FAILED": KillChainStage.TASKING.value,
     "TASK_BLOCKED": KillChainStage.TASKING.value,
     "C2_EXFIL": KillChainStage.EXFILTRATION.value,
+    "EXFIL_ATTEMPTED": KillChainStage.EXFILTRATION.value,
+    "EXFIL_PARTIAL": KillChainStage.EXFILTRATION.value,
+    "EXFIL_SUCCEEDED": KillChainStage.EXFILTRATION.value,
     "EXFIL_BLOCKED": KillChainStage.EXFILTRATION.value,
     "C2_DATABASE_WRITE": KillChainStage.EXFILTRATION.value,
     "POST_COMPROMISE_ACTION": KillChainStage.PERSISTENCE.value,
     "POST_COMPROMISE_BLOCKED": KillChainStage.DETECTION.value,
     "OBJECTIVE_COMPLETED": KillChainStage.PERSISTENCE.value,
     "OBJECTIVE_FAILED": KillChainStage.DETECTION.value,
+    "C2_SESSION_EXPIRED": KillChainStage.DETECTION.value,
+    "C2_SESSION_BURNED": KillChainStage.DETECTION.value,
     "KILL_CHAIN_TRANSITION": KillChainStage.DELIVERY.value,  # varies, set explicitly
+    "C2_LIFECYCLE_TRANSITION": KillChainStage.PERSISTENCE.value,
 }
 
 # All new C2 event types
@@ -107,11 +124,16 @@ C2_EVENT_TYPES = {
     "C2_BEACON",
     "C2_CHANNEL_ESTABLISHED",
     "C2_CHANNEL_FAILED",
+    "C2_BEACON_FAILED",
     "C2_TASK",
+    "C2_TASK_FAILED",
     "C2_EXFIL",
     "C2_DATABASE_WRITE",
     "BEACON_BLOCKED",
     "TASK_BLOCKED",
+    "EXFIL_ATTEMPTED",
+    "EXFIL_PARTIAL",
+    "EXFIL_SUCCEEDED",
     "EXFIL_BLOCKED",
     "OBJECTIVE_COMPLETED",
     "OBJECTIVE_FAILED",
@@ -122,14 +144,47 @@ C2_EVENT_TYPES = {
 
 POST_COMPROMISE_EVENT_TYPES = C2_EVENT_TYPES | {"INFECTION_SUCCESSFUL"}
 
-BEACON_FILTER_EVENTS = {"C2_BEACON", "BEACON_BLOCKED", "C2_CHANNEL_ESTABLISHED", "C2_CHANNEL_FAILED"}
-EXFIL_FILTER_EVENTS = {"C2_EXFIL", "EXFIL_BLOCKED", "C2_DATABASE_WRITE"}
-TASKING_FILTER_EVENTS = {"C2_TASK", "TASK_BLOCKED"}
-KILL_CHAIN_FILTER_EVENTS = {"KILL_CHAIN_TRANSITION"}
+BEACON_FILTER_EVENTS = {
+    "C2_BEACON",
+    "BEACON_BLOCKED",
+    "C2_CHANNEL_ESTABLISHED",
+    "C2_CHANNEL_FAILED",
+    "C2_BEACON_FAILED",
+}
+EXFIL_FILTER_EVENTS = {
+    "C2_EXFIL",
+    "EXFIL_ATTEMPTED",
+    "EXFIL_PARTIAL",
+    "EXFIL_SUCCEEDED",
+    "EXFIL_BLOCKED",
+    "C2_DATABASE_WRITE",
+}
+TASKING_FILTER_EVENTS = {"C2_TASK", "C2_TASK_FAILED", "TASK_BLOCKED"}
+KILL_CHAIN_FILTER_EVENTS = {"KILL_CHAIN_TRANSITION", "C2_LIFECYCLE_TRANSITION"}
 
 
 def classify_kill_chain_stage(event_type: str) -> str:
     return EVENT_TO_KILL_CHAIN_STAGE.get(event_type, "")
+
+
+def resolve_kill_chain_stage(
+    event_type: str,
+    *,
+    src: str = "",
+    dst: str = "",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> str:
+    metadata = metadata or {}
+    explicit_stage = str(metadata.get("kill_chain_stage", "") or "").strip().upper()
+    if explicit_stage:
+        return explicit_stage
+    event_name = str(event_type or "").strip().upper()
+    if event_name == "INFECTION_SUCCESSFUL":
+        compromised_agent = str(dst or metadata.get("compromised_agent") or "").strip()
+        if compromised_agent and get_neighbors(compromised_agent):
+            return KillChainStage.RELAY.value
+        return KillChainStage.COMPROMISE.value
+    return EVENT_TO_KILL_CHAIN_STAGE.get(event_name, "")
 
 
 def stage_index(stage: str) -> int:
@@ -156,13 +211,17 @@ class ObjectiveStatus(str, enum.Enum):
 
 SUPPORTED_OBJECTIVES = {
     "SPREAD_FAST": "infection rate above threshold",
-    "REACH_DEEPEST_NODE": "agent-a compromise",
+    "REACH_DEEPEST_NODE": "deepest reachable node compromised for the active topology",
     "MAXIMIZE_SUCCESS_RATE": "success rate above threshold",
     "MAXIMIZE_MUTATION_DIVERSITY": "mutation diversity above threshold",
     "ESTABLISH_C2": "beacon + tasking session established",
     "MAINTAIN_PERSISTENCE": "repeated beaconing over N minutes",
     "EXFILTRATE_DATA": "exfil reaches C2 sink",
     "STAY_UNDETECTED": "no detection events for N minutes post-compromise",
+    "MULTI_BRANCH_SPREAD": "infection reaches at least two distinct relay branches",
+    "CARRIER_PERSISTENCE": "infected carrier remains compromised beyond the persistence threshold",
+    "EVADE_QUARANTINE": "compromised node avoids quarantine beyond the evasion threshold",
+    "EXFILTRATE_MULTI_NODE": "two or more compromised nodes exfiltrate successfully",
 }
 
 

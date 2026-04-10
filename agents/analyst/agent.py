@@ -31,6 +31,8 @@ from pathlib import Path
 from typing import Any, Dict
 
 from shared.agent_base import AgentBase, AgentState, EventPayload
+from shared.cognition import hybrid_should_escalate, lightweight_evaluate
+from shared.defense_friction import DefenseFrictionMemory
 from shared.llm_service import LLMService, ComplianceVerdict
 
 
@@ -93,6 +95,9 @@ class AnalystAgent(AgentBase):
         self.max_infection_probability = float(
             os.environ.get("ANALYST_MAX_INFECTION_P", "0.85")
         )
+        self.gray_zone_low = float(os.environ.get("ANALYST_GRAY_ZONE_LOW", "0.30"))
+        self.gray_zone_high = float(os.environ.get("ANALYST_GRAY_ZONE_HIGH", "0.70"))
+        self._defense_friction = DefenseFrictionMemory()
         if not 0.0 <= self.min_infection_probability < self.max_infection_probability <= 1.0:
             raise ValueError(
                 "ANALYST_MIN_INFECTION_P must be >= 0, ANALYST_MAX_INFECTION_P must be <= 1, "
@@ -113,6 +118,7 @@ class AnalystAgent(AgentBase):
         """Reset LLM state and restore base defense on simulation reset."""
         self.defense_level = self.base_defense
         self.llm_service.reset()
+        self._defense_friction.reset()
 
     def _uncertainty_level(self, verdict: ComplianceVerdict) -> str:
         if verdict.model_status in ("fallback", "error"):
@@ -188,6 +194,12 @@ class AnalystAgent(AgentBase):
             return
 
         self.last_message_metadata = dict(message.metadata)
+        self._defense_friction.observe(
+            "INFECTION_ATTEMPT",
+            self.last_message_metadata,
+            message.src,
+            self.agent_id,
+        )
         hop_count = int(message.metadata.get("hop_count", 0) or 0)
         injection_id = message.metadata.get("injection_id", "")
         attempt_id = str(
@@ -218,14 +230,29 @@ class AnalystAgent(AgentBase):
             f"src={message.src} attack_type={attack_type} "
             f"hop_count={hop_count} mutation_v={message.metadata.get('mutation_v', 0)}"
         )
-        llm_task = asyncio.create_task(
-            self.llm_service.assess_compliance(
-                message.payload,
-                self.get_system_prompt(),
-                source_agent=message.src,
-                metadata_context=metadata_context,
-            )
+        probabilistic_eval = lightweight_evaluate(
+            message.payload,
+            self.phenotype,
+            random.Random(),
+            attack_strength=attack_strength,
+            attack_type=attack_type,
         )
+        base_p = float(probabilistic_eval["infection_probability"])
+        llm_escalated = hybrid_should_escalate(
+            float(probabilistic_eval["score"]),
+            low=self.gray_zone_low,
+            high=self.gray_zone_high,
+        )
+        llm_task = None
+        if llm_escalated:
+            llm_task = asyncio.create_task(
+                self.llm_service.assess_compliance(
+                    message.payload,
+                    self.get_system_prompt(),
+                    source_agent=message.src,
+                    metadata_context=metadata_context,
+                )
+            )
         await self.inject_processing_delay()
 
         # Check for stale events after delay
@@ -235,7 +262,8 @@ class AnalystAgent(AgentBase):
             or (control_reset_id and message_reset_id
                 and message_reset_id != control_reset_id)
         ):
-            llm_task.cancel()
+            if llm_task is not None:
+                llm_task.cancel()
             await self._emit_event(
                 "STALE_EVENT_DROPPED",
                 src=message.src, dst=self.agent_id,
@@ -251,13 +279,26 @@ class AnalystAgent(AgentBase):
 
         # Await LLM result
         llm_verdict: ComplianceVerdict
-        try:
-            llm_verdict = await llm_task
-        except Exception:
+        if llm_task is None:
             llm_verdict = ComplianceVerdict(
-                model_status="error",
-                summary="LLM task failed",
+                verdict="uncertain",
+                confidence=max(0.5, min(1.0, base_p)),
+                compliance_score=max(0.0, min(1.0, 1.0 - base_p)),
+                risk_score=max(0.0, min(1.0, base_p)),
+                summary="Gray-zone escalation skipped; probabilistic evaluation was decisive.",
+                decision_rationale="Hybrid probabilistic path selected outside analyst gray zone.",
+                uncertainty_reason="outside_gray_zone",
+                recommended_action="analyze",
+                model_status="skipped",
             )
+        else:
+            try:
+                llm_verdict = await llm_task
+            except Exception:
+                llm_verdict = ComplianceVerdict(
+                    model_status="error",
+                    summary="LLM task failed",
+                )
         uncertainty_level = self._uncertainty_level(llm_verdict)
         decision_rationale = self._decision_rationale(llm_verdict)
         semantic_decision_path = (
@@ -287,8 +328,10 @@ class AnalystAgent(AgentBase):
                 "llm_model_status": llm_verdict.model_status,
                 "llm_latency_ms": round(llm_verdict.latency_ms, 1),
                 "llm_model": self.model,
+                "probabilistic_score": round(probabilistic_eval["score"], 4),
                 "decision_source": (
-                    "llm" if llm_verdict.model_status == "ok"
+                    "hybrid" if llm_verdict.model_status == "ok"
+                    else "hybrid_probabilistic" if llm_verdict.model_status == "skipped"
                     else "fallback"
                 ),
             },
@@ -307,7 +350,6 @@ class AnalystAgent(AgentBase):
         # ═══════════════════════════════════════════════════════════
         # LAYER 2: PROBABILISTIC BASE (sigmoid infection model)
         # ═══════════════════════════════════════════════════════════
-        base_p = self.compute_infection_probability(attack_strength, attack_type)
 
         # ═══════════════════════════════════════════════════════════
         # LAYER 3: HYBRID DECISION — LLM compliance modulates defense
@@ -318,16 +360,14 @@ class AnalystAgent(AgentBase):
         infection_roll = 1.0
         decision_path = "unknown"
 
-        if llm_verdict.model_status in ("fallback", "error"):
+        if llm_verdict.model_status in ("fallback", "error", "skipped"):
             # ──── LLM UNAVAILABLE → pure probabilistic fallback ────
             P_infect_noisy = _clamp(
                 self.add_stochastic_noise(base_p),
                 self.min_infection_probability,
                 self.max_infection_probability,
             )
-            infection_roll = random.random()
-            is_infected = infection_roll < P_infect_noisy
-            decision_path = "probabilistic_fallback"
+            decision_path = "hybrid_probabilistic" if llm_verdict.model_status == "skipped" else "probabilistic_fallback"
             print(
                 f"[{self.agent_id}] │ ⚠️ LLM fallback — pure probabilistic "
                 f"P={P_infect_noisy:.2%}"
@@ -352,8 +392,6 @@ class AnalystAgent(AgentBase):
                 self.min_infection_probability,
                 self.max_infection_probability,
             )
-            infection_roll = random.random()
-            is_infected = infection_roll < P_infect_noisy
             decision_path = "llm_persuaded"
             print(
                 f"[{self.agent_id}] │ 🟡 LLM PERSUADED — defense reduced by "
@@ -380,8 +418,6 @@ class AnalystAgent(AgentBase):
                 self.min_infection_probability,
                 self.max_infection_probability,
             )
-            infection_roll = random.random()
-            is_infected = infection_roll < P_infect_noisy
             decision_path = "llm_refusing"
             print(
                 f"[{self.agent_id}] │ 🟢 LLM REFUSING — defense boosted by "
@@ -408,8 +444,6 @@ class AnalystAgent(AgentBase):
                 self.min_infection_probability,
                 self.max_infection_probability,
             )
-            infection_roll = random.random()
-            is_infected = infection_roll < P_infect_noisy
             decision_path = "escalate_to_guardian"
             print(
                 f"[{self.agent_id}] │ 🔵 ESCALATING to Guardian — "
@@ -441,14 +475,28 @@ class AnalystAgent(AgentBase):
                 self.min_infection_probability,
                 self.max_infection_probability,
             )
-            infection_roll = random.random()
-            is_infected = infection_roll < P_infect_noisy
             decision_path = "hybrid_uncertain"
             print(
                 f"[{self.agent_id}] │ ⚪ UNCERTAIN — compliance modifier "
                 f"{compliance_modifier:+.3f} → defense={effective_defense:.2f} "
                 f"P={P_infect_noisy:.2%}"
             )
+
+        fr = self._defense_friction.decide_relay_friction(dict(message.metadata), message.src, random)
+        if fr.force_hard_block:
+            P_infect_noisy = 0.0
+            infection_roll = 1.0
+            is_infected = False
+        else:
+            P_infect_noisy = _clamp(
+                P_infect_noisy * fr.p_infect_multiplier,
+                self.min_infection_probability,
+                self.max_infection_probability,
+            )
+            if fr.should_defer:
+                P_infect_noisy = _clamp(P_infect_noisy * 0.72, self.min_infection_probability, self.max_infection_probability)
+            infection_roll = random.random()
+            is_infected = infection_roll < P_infect_noisy
 
         print(
             f"[{self.agent_id}] │ Roll: {infection_roll:.2%} → "
@@ -479,6 +527,8 @@ class AnalystAgent(AgentBase):
                 "llm_latency_ms": round(llm_verdict.latency_ms, 1),
                 "base_defense": round(self.base_defense, 4),
                 "effective_defense": round(self.defense_level, 4),
+                "decision_source": "hybrid_probabilistic" if llm_verdict.model_status == "skipped" else "hybrid",
+                "probabilistic_score": round(probabilistic_eval["score"], 4),
                 "base_p": round(base_p, 4),
                 "P_infection_final": round(P_infect_noisy, 4),
                 "infection_roll": round(infection_roll, 4),
