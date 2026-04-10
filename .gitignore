@@ -1,0 +1,87 @@
+# ============================================================================
+# Epidemic Lab — .gitignore
+# ============================================================================
+
+# ---- Secrets & local config -------------------------------------------------
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
+.claude/launch.json
+
+# ---- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Build / distribution ---------------------------------------------------
+build/
+dist/
+*.spec.bak
+*.manifest
+pip-wheel-metadata/
+
+# ---- Runtime data & telemetry (kept on disk, out of git) --------------------
+logs/
+!logs/.gitkeep
+*.jsonl
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+siem_index_*.db
+strains.db
+
+# Reports / one-off artifacts
+test-results/
+*.prof
+*.pstats
+
+# ---- Frontend (Node / Vite) -------------------------------------------------
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.codex-*.html
+frontend/public/
+.vite/
+*.local
+
+# ---- Asset / scratch directories --------------------------------------------
+Sprites/
+
+# ---- Editor / IDE -----------------------------------------------------------
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- OS ---------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+$RECYCLE.BIN/
+
+# ---- Docker (local overrides) -----------------------------------------------
+docker-compose.override.yml
