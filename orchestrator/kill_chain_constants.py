@@ -15,7 +15,11 @@ from types import ModuleType
 
 def _load_shared_kill_chain() -> ModuleType:
     candidate_paths = [
+        # In-container: /app/shared/kill_chain.py (mounted by orchestrator Dockerfile)
+        Path(__file__).resolve().parent / "shared" / "kill_chain.py",
+        # Legacy in-container shim (kept for backward compatibility)
         Path(__file__).with_name("shared_kill_chain.py"),
+        # Host/dev layout: repo root -> agents/shared/kill_chain.py
         Path(__file__).resolve().parents[1] / "agents" / "shared" / "kill_chain.py",
     ]
     for path in candidate_paths:
@@ -34,6 +38,7 @@ def _load_shared_kill_chain() -> ModuleType:
 _SHARED = _load_shared_kill_chain()
 
 EVENT_TO_KILL_CHAIN_STAGE = dict(_SHARED.EVENT_TO_KILL_CHAIN_STAGE)
+resolve_kill_chain_stage = _SHARED.resolve_kill_chain_stage
 C2_EVENT_TYPES = set(_SHARED.C2_EVENT_TYPES)
 POST_COMPROMISE_EVENT_TYPES = set(_SHARED.POST_COMPROMISE_EVENT_TYPES)
 BEACON_FILTER_EVENTS = set(_SHARED.BEACON_FILTER_EVENTS)
@@ -43,6 +48,7 @@ KILL_CHAIN_FILTER_EVENTS = set(_SHARED.KILL_CHAIN_FILTER_EVENTS)
 
 __all__ = [
     "EVENT_TO_KILL_CHAIN_STAGE",
+    "resolve_kill_chain_stage",
     "C2_EVENT_TYPES",
     "POST_COMPROMISE_EVENT_TYPES",
     "BEACON_FILTER_EVENTS",

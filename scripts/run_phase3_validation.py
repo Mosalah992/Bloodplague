@@ -128,7 +128,11 @@ def main():
     compose_env["HEARTBEAT_INTERVAL_S"] = str(ACCELERATED_HEARTBEAT_SECONDS)
 
     run_command(["docker", "compose", "down", "--remove-orphans"], env=compose_env, output_path=ARTIFACT_DIR / "compose_down.txt")
-    run_command(["docker", "compose", "build", "orchestrator", "agent-a", "agent-b", "agent-c"], env=compose_env, output_path=ARTIFACT_DIR / "compose_build.txt")
+    run_command(
+        ["docker", "compose", "build", "orchestrator", "courier-1", "courier-2", "analyst-1", "analyst-2", "guardian"],
+        env=compose_env,
+        output_path=ARTIFACT_DIR / "compose_build.txt",
+    )
     run_command(["docker", "compose", "up", "-d"], env=compose_env, output_path=ARTIFACT_DIR / "compose_up.txt")
 
     try:
@@ -143,7 +147,7 @@ def main():
         for index, level in enumerate(RUN_LEVELS, start=1):
             reset_response = api_json("/reset", method="POST", payload={})
             time.sleep(RESET_WAIT_SECONDS)
-            inject_response = api_json("/inject/agent-c", method="POST", payload={"worm_level": level})
+            inject_response = api_json("/inject/courier-1", method="POST", payload={"worm_level": level})
             time.sleep(OBSERVATION_SECONDS)
 
             run_payload = fetch_events(after_id=last_seen_id, order="asc", limit=800)

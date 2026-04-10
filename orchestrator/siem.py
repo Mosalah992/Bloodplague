@@ -11,11 +11,16 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+import sys
 
 try:
     from payload_decode import decode_payload
 except ImportError:  # pragma: no cover - test/runtime import path split
     from orchestrator.payload_decode import decode_payload
+try:
+    from telemetry_integrity import verify_sqlite_integrity
+except ImportError:  # pragma: no cover
+    from orchestrator.telemetry_integrity import verify_sqlite_integrity
 try:
     from intelligence import (
         build_campaign_view,
@@ -42,11 +47,12 @@ except ImportError:  # pragma: no cover - test/runtime import path split
     )
 
 try:
-    from kill_chain_constants import (
-        EVENT_TO_KILL_CHAIN_STAGE,
-        C2_EVENT_TYPES,
-        BEACON_FILTER_EVENTS,
-        EXFIL_FILTER_EVENTS,
+        from kill_chain_constants import (
+            EVENT_TO_KILL_CHAIN_STAGE,
+            resolve_kill_chain_stage,
+            C2_EVENT_TYPES,
+            BEACON_FILTER_EVENTS,
+            EXFIL_FILTER_EVENTS,
         TASKING_FILTER_EVENTS,
         KILL_CHAIN_FILTER_EVENTS,
         POST_COMPROMISE_EVENT_TYPES,
@@ -55,6 +61,7 @@ except ImportError:
     try:
         from orchestrator.kill_chain_constants import (
             EVENT_TO_KILL_CHAIN_STAGE,
+            resolve_kill_chain_stage,
             C2_EVENT_TYPES,
             BEACON_FILTER_EVENTS,
             EXFIL_FILTER_EVENTS,
@@ -70,6 +77,7 @@ except ImportError:
         try:
             from kill_chain import (
                 EVENT_TO_KILL_CHAIN_STAGE,
+                resolve_kill_chain_stage,
                 C2_EVENT_TYPES,
                 BEACON_FILTER_EVENTS,
                 EXFIL_FILTER_EVENTS,
@@ -79,12 +87,25 @@ except ImportError:
             )
         except ImportError:
             EVENT_TO_KILL_CHAIN_STAGE = {}
+            resolve_kill_chain_stage = lambda event_type, **kwargs: EVENT_TO_KILL_CHAIN_STAGE.get(event_type, "")
             C2_EVENT_TYPES = set()
             BEACON_FILTER_EVENTS = set()
             EXFIL_FILTER_EVENTS = set()
             TASKING_FILTER_EVENTS = set()
             KILL_CHAIN_FILTER_EVENTS = set()
             POST_COMPROMISE_EVENT_TYPES = set()
+
+_SHARED_DIR = Path(__file__).resolve().parents[1] / "agents" / "shared"
+if str(_SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(_SHARED_DIR))
+
+from topology import (
+    agent_ids as topology_agent_ids,
+    deepest_agent as topology_deepest_agent,
+    get_topology,
+    injection_targets as topology_injection_targets,
+    target_context as topology_target_context,
+)
 
 class ClosingConnection(sqlite3.Connection):
     def __exit__(self, exc_type, exc_value, traceback) -> bool:  # type: ignore[override]
@@ -159,6 +180,32 @@ SEARCHABLE_FIELDS = {
     "payload_wrapper_type": "payload_wrapper_type",
 }
 METADATA_ALIASES = {
+    # Forensic correlation (mirrored from top-level in orchestrator ingest, Patch 1)
+    "run_id": "$.run_id",
+    "parent_event_id": "$.parent_event_id",
+    "strain_id": "$.strain_id",
+    "attack_id": "$.attack_id",
+    "event_id": "$.event_id",
+    "trace_id": "$.trace_id",
+    "stream_message_id": "$.stream_message_id",
+    "mutation_selection_reason": "$.mutation_selection_reason",
+    "detectability_score": "$.detectability_score",
+    "branching_recommended": "$.branching_recommended",
+    "strain_fitness_score": "$.strain_fitness_score",
+    "strain_novelty_score": "$.strain_novelty_score",
+    "strain_mutate_pressure": "$.strain_mutate_pressure",
+    "strain_similarity_key": "$.strain_similarity_key",
+    "strain_branching_recommended": "$.strain_branching_recommended",
+    "defense_friction_outcome": "$.defense_friction_outcome",
+    "friction_stage": "$.friction_stage",
+    "friction_policy_match": "$.friction_policy_match",
+    "friction_anomaly_score": "$.friction_anomaly_score",
+    "friction_repeated_hash": "$.friction_repeated_hash",
+    "friction_strain_blacklist": "$.friction_strain_blacklist",
+    "friction_c2_pattern": "$.friction_c2_pattern",
+    "friction_exfil_signature": "$.friction_exfil_signature",
+    "friction_false_positive": "$.friction_false_positive",
+    "friction_delayed_detection": "$.friction_delayed_detection",
     "campaign_id": "$.campaign_id",
     "strategy_family": "$.strategy_family",
     "chosen_strategy": "$.chosen_strategy",
@@ -180,6 +227,12 @@ METADATA_ALIASES = {
     "parent_payload_hash_full": "$.parent_payload_hash_full",
     "payload_source": "$.payload_source",
     "payload_visibility_level": "$.payload_visibility_level",
+    "payload_family_id": "$.payload_family_id",
+    "payload_novelty_class": "$.payload_novelty_class",
+    "payload_novelty_score": "$.payload_novelty_score",
+    "payload_norm_hash_full": "$.payload_norm_hash_full",
+    "payload_struct_signature": "$.payload_struct_signature",
+    "payload_family_prior_count": "$.payload_family_prior_count",
     "runtime_override": "$.runtime_override",
     "outcome": "$.outcome",
     "preferred_strategy": "$.preferred_strategy",
@@ -214,6 +267,11 @@ METADATA_ALIASES = {
     "kill_chain_stage": "$.kill_chain_stage",
     "previous_kill_chain_stage": "$.previous_kill_chain_stage",
     "c2_session_id": "$.c2_session_id",
+    "lifecycle_state": "$.lifecycle_state",
+    "from_state": "$.from_state",
+    "to_state": "$.to_state",
+    "internal_action_count": "$.internal_action_count",
+    "raw_payload": "$.raw_payload",
     "c2_channel_id": "$.c2_channel_id",
     "beacon_id": "$.beacon_id",
     "exfil_id": "$.exfil_id",
@@ -228,16 +286,33 @@ METADATA_ALIASES = {
     "objective_status": "$.objective_status",
     "compromised_agent": "$.compromised_agent",
     "destination_system": "$.destination_system",
+    "destination_trust": "$.destination_trust",
+    "destination_risk": "$.destination_risk",
+    "content_hash": "$.content_hash",
+    "chunk_count": "$.chunk_count",
+    "chunks_delivered": "$.chunks_delivered",
+    "content_sensitivity_class": "$.content_sensitivity_class",
+    "detection_reason": "$.detection_reason",
+    "failure_reason": "$.failure_reason",
+    "exfil_preview_redacted": "$.exfil_preview_redacted",
+    "size_constraint_note": "$.size_constraint_note",
     "detection_surface": "$.detection_surface",
     "blocked_by": "$.blocked_by",
     "decision_source": "$.decision_source",
+    "epidemic_state": "$.epidemic_state",
+    "epidemic_state_before": "$.epidemic_state_before",
+    "cognition_tier": "$.cognition_tier",
+    "quarantine_trigger": "$.quarantine_trigger",
+    "quarantine_duration": "$.quarantine_duration",
+    "branch_id": "$.branch_id",
+    "topology_hop": "$.topology_hop",
     "from_stage": "$.from_stage",
     "to_stage": "$.to_stage",
 }
 
 TEXT_COLUMNS = ("event", "src", "dst", "attack_type", "payload", "payload_preview", "decoded_payload_preview", "decode_status", "decode_chain", "payload_wrapper_type", "payload_prefix_tag", "raw_event", "reset_id", "injection_id")
-NUMERIC_FIELDS = {"attack_strength", "mutation_v", "hop_count", "epoch", "knowledge_confidence", "inferred_target_resistance", "prior_success_rate", "score", "payload_length", "has_payload", "has_decoded_payload", "decode_confidence", "strategy_weight_after", "mutation_weight_after", "defense_confidence", "defense_effectiveness", "dynamic_defense", "defense_tier", "hardening_effect", "inferred_risk", "anomaly_score", "repetition_score", "weight_change", "retry_count", "exfil_size", "beacon_interval", "beacon_success"}
-FIELD_SIDEBAR_FIELDS = ("event", "src", "dst", "attack_type", "state_after", "reset_id", "epoch", "source_plane", "strategy_family", "technique", "campaign_id", "objective", "semantic_family", "mutation_type", "decode_status", "payload_wrapper_type", "knowledge_source", "defense_type", "selected_strategy", "defense_result", "kill_chain_stage", "c2_session_id", "objective_status", "task_name", "exfil_type", "blocked_by")
+NUMERIC_FIELDS = {"attack_strength", "mutation_v", "hop_count", "epoch", "knowledge_confidence", "inferred_target_resistance", "prior_success_rate", "score", "payload_length", "has_payload", "has_decoded_payload", "decode_confidence", "strategy_weight_after", "mutation_weight_after", "defense_confidence", "defense_effectiveness", "dynamic_defense", "defense_tier", "hardening_effect", "inferred_risk", "anomaly_score", "repetition_score", "weight_change", "retry_count", "exfil_size", "beacon_interval", "beacon_success", "quarantine_duration", "topology_hop"}
+FIELD_SIDEBAR_FIELDS = ("event", "src", "dst", "attack_type", "state_after", "reset_id", "epoch", "source_plane", "strategy_family", "technique", "campaign_id", "objective", "semantic_family", "mutation_type", "decode_status", "payload_wrapper_type", "knowledge_source", "defense_type", "selected_strategy", "defense_result", "kill_chain_stage", "c2_session_id", "objective_status", "task_name", "exfil_type", "blocked_by", "epidemic_state", "cognition_tier", "decision_source", "quarantine_trigger")
 FAST_TIMELINE_SAMPLE_LIMIT = 2000
 FAST_FIELD_SAMPLE_LIMIT = 1500
 AUTO_ANALYTICS_RESULT_THRESHOLD = 2000
@@ -245,9 +320,22 @@ PHASE3_ANALYTICS_LIMIT = 4000
 PHASE3_CAMPAIGN_LIMIT = 3000
 PHASE3_LINEAGE_EVENT_LIMIT = 2500
 PHASE3_LINEAGE_HASH_LIMIT = 160
+TARGET_CONTEXT = {
+    agent_id: {"depth": int(context.get("depth", 0) or 0)}
+    for agent_id, context in topology_target_context().items()
+}
+ACTIVE_TOPOLOGY = get_topology()
+TOPOLOGY_AGENT_IDS = tuple(topology_agent_ids())
+TOPOLOGY_AGENT_TOKEN_SET = {agent_id.lower() for agent_id in TOPOLOGY_AGENT_IDS}
+DEFAULT_INJECTION_AGENT = (
+    topology_injection_targets()[0]
+    if topology_injection_targets()
+    else (TOPOLOGY_AGENT_IDS[0] if TOPOLOGY_AGENT_IDS else "courier-1")
+)
+DEFAULT_DEEPEST_AGENT = topology_deepest_agent(TOPOLOGY_AGENT_IDS) or DEFAULT_INJECTION_AGENT
 QUERY_HELP_EXAMPLES = {
     "infections": [
-        "event=INFECTION_SUCCESSFUL AND dst=agent-a",
+        f"event=INFECTION_SUCCESSFUL AND dst={DEFAULT_DEEPEST_AGENT}",
         "event=INFECTION_ATTEMPT AND attack_type=PI-ROLEPLAY",
     ],
     "mutations": [
@@ -255,12 +343,12 @@ QUERY_HELP_EXAMPLES = {
         "mutation_type=reframe AND event=ATTACK_EXECUTED",
     ],
     "campaigns": [
-        "campaign_id exists AND src=agent-c",
+        f"campaign_id exists AND src={DEFAULT_INJECTION_AGENT}",
         "campaign_id=cmp_123456 AND event=CAMPAIGN_ADAPTED",
         "campaign_id=cmp_123456 AND objective contains \"REACH\"",
     ],
     "attacker_decisions": [
-        "event=STRATEGY_SELECTED AND src=agent-c",
+        f"event=STRATEGY_SELECTED AND src={DEFAULT_INJECTION_AGENT}",
         "knowledge_source=\"Red Teaming AI\" AND event=ATTACKER_DECISION",
         "runtime_override=true AND event=ATTACK_RESULT_EVALUATED",
     ],
@@ -287,7 +375,7 @@ QUERY_HELP_EXAMPLES = {
     "c2_operations": [
         "kill_chain_stage=BEACON",
         "kill_chain_stage=EXFILTRATION AND objective_status=completed",
-        "event=C2_BEACON AND compromised_agent=agent-c",
+        f"event=C2_BEACON AND compromised_agent={DEFAULT_INJECTION_AGENT}",
         "event=EXFIL_BLOCKED",
         "objective=ESTABLISH_C2 AND objective_status=completed",
         "task_name=collect_state",
@@ -296,11 +384,18 @@ QUERY_HELP_EXAMPLES = {
         "c2_session_id exists AND beacon_success=false",
     ],
     "kill_chain": [
-        "kill_chain_stage=COMPROMISE AND dst=agent-a",
+        f"kill_chain_stage=COMPROMISE AND dst={DEFAULT_DEEPEST_AGENT}",
         "kill_chain_stage=BEACON",
         "kill_chain_stage=EXFILTRATION",
         "event=KILL_CHAIN_TRANSITION",
         "campaign_id exists AND kill_chain_stage exists",
+    ],
+    "epidemic": [
+        "event=EPIDEMIC_STATE_TRANSITION",
+        "epidemic_state=I_c",
+        "event=QUARANTINE_ENFORCED OR event=QUARANTINE_ISSUED",
+        "decision_source=probabilistic OR decision_source=hybrid",
+        "branch_id exists AND topology_hop>=2",
     ],
 }
 ATTACK_TYPE_SYNONYMS = {
@@ -346,11 +441,6 @@ STRATEGY_PHASE_MAP = {
     "ROLEPLAY_MANIPULATION": "exploitation",
     "JAILBREAK_ESCALATION": "escalation",
 }
-TARGET_CONTEXT = {
-    "agent-a": {"depth": 3},
-    "agent-b": {"depth": 2},
-    "agent-c": {"depth": 1},
-}
 PHASE3_PRESET_QUERIES = [
     {"id": "successful_mutation_families", "label": "Successful mutation families", "query": "mutation_type exists AND event=INFECTION_SUCCESSFUL", "context": "search"},
     {"id": "failed_mutation_families", "label": "Failed mutation families", "query": "mutation_type exists AND event=INFECTION_BLOCKED", "context": "search"},
@@ -372,7 +462,7 @@ PHASE3_PRESET_QUERIES = [
     {"id": "campaigns_reached_c2", "label": "Campaigns that reached C2", "query": "event=C2_CHANNEL_ESTABLISHED", "context": "search"},
     {"id": "campaigns_reached_exfil", "label": "Campaigns that reached exfil", "query": "event=C2_EXFIL AND beacon_success=true", "context": "search"},
     {"id": "blocked_exfil_campaigns", "label": "Blocked exfil campaigns", "query": "event=EXFIL_BLOCKED", "context": "search"},
-    {"id": "deep_node_no_exfil", "label": "Deep-node compromise without exfil", "query": "kill_chain_stage=COMPROMISE AND dst=agent-a", "context": "search"},
+    {"id": "deep_node_no_exfil", "label": "Deep-node compromise without exfil", "query": f"kill_chain_stage=COMPROMISE AND dst={DEFAULT_DEEPEST_AGENT}", "context": "search"},
     {"id": "beacon_only_no_exfil", "label": "Beacon-only (no exfil)", "query": "event=C2_BEACON", "context": "search"},
     {"id": "exfil_after_mutation", "label": "Exfil after payload reuse", "query": "event=C2_EXFIL AND mutation_v>=2", "context": "search"},
     {"id": "kill_chain_transitions", "label": "Kill chain stage transitions", "query": "event=KILL_CHAIN_TRANSITION", "context": "search"},
@@ -380,6 +470,10 @@ PHASE3_PRESET_QUERIES = [
     {"id": "objective_failures", "label": "Objective failures", "query": "event=OBJECTIVE_FAILED", "context": "search"},
     {"id": "c2_sessions_active", "label": "Active C2 sessions", "query": "event=C2_CHANNEL_ESTABLISHED", "context": "investigation"},
     {"id": "post_compromise_timeline", "label": "Post-compromise timeline", "query": "kill_chain_stage=BEACON OR kill_chain_stage=TASKING OR kill_chain_stage=EXFILTRATION", "context": "investigation"},
+    {"id": "epidemic_state_transitions", "label": "Epidemic state transitions", "query": "event=EPIDEMIC_STATE_TRANSITION", "context": "search"},
+    {"id": "quarantine_activity", "label": "Quarantine activity", "query": "event=QUARANTINE_ENFORCED OR event=QUARANTINE_ISSUED", "context": "search"},
+    {"id": "multi_branch_spread", "label": "Multi-branch spread", "query": "branch_id exists AND event=INFECTION_SUCCESSFUL", "context": "search"},
+    {"id": "active_c2_carriers", "label": "C2-active carriers", "query": "epidemic_state=I_c OR epidemic_state=I_x OR epidemic_state=P", "context": "search"},
 ]
 
 
@@ -388,18 +482,22 @@ def _utc_now_iso() -> str:
 
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:
+    """Parse to timezone-aware UTC. Naive ISO strings are treated as UTC so sorts never mix naive/aware."""
     if value in (None, ""):
         return None
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(float(value), tz=timezone.utc)
     text = str(value).strip()
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         try:
             return datetime.fromtimestamp(float(text), tz=timezone.utc)
         except ValueError:
             return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def _coerce_number(value: Any, number_type: type) -> Any:
@@ -519,8 +617,13 @@ class SIEMIndexer:
         self._last_sync_time: float = 0.0
         self._sync_cooldown_s: float = float(os.environ.get("SIEM_SYNC_COOLDOWN_S", "5"))
         self._query_timeout_s: float = float(os.environ.get("SIEM_QUERY_TIMEOUT_S", "20"))
+        self._index_degraded: bool = False
+        self._degraded_reason: str = ""
+        self._degraded_event_emitted: bool = False
+        self._last_integrity_check_ts: float = 0.0
         self._init_db()
         self.ensure_index_health()
+        self.bootstrap_integrity_after_init()
 
     def _connect(self, query_timeout_s: float = 0) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, factory=ClosingConnection, timeout=30.0)
@@ -714,6 +817,15 @@ class SIEMIndexer:
             self._repairing_index = False
 
     def ensure_index_health(self) -> None:
+        chk = verify_sqlite_integrity(self.db_path)
+        self._last_integrity_check_ts = time.time()
+        if not chk.get("ok") and not chk.get("skipped"):
+            if os.environ.get("SIEM_AGGRESSIVE_REPAIR", "").strip().lower() in ("1", "true", "yes", "on"):
+                self._rebuild_index_tables()
+                self._clear_index_degraded()
+            else:
+                self._set_index_degraded(f"ensure_index_health:{chk.get('detail', '')[:400]}")
+                return
         try:
             with self._connect() as conn:
                 conn.execute("SELECT COUNT(*) FROM siem_events").fetchone()
@@ -721,8 +833,87 @@ class SIEMIndexer:
                 conn.execute("SELECT COUNT(*) FROM siem_state").fetchone()
         except sqlite3.DatabaseError as exc:
             if not self._should_repair(exc):
-                raise
+                self._set_index_degraded(f"ensure_index_health_query:{exc}")
+                return
             self._rebuild_index_tables()
+            self._clear_index_degraded()
+
+    def _set_index_degraded(self, reason: str) -> None:
+        was = self._index_degraded
+        self._index_degraded = True
+        self._degraded_reason = (reason or "unknown")[:900]
+        if not was and not self._degraded_event_emitted:
+            self._degraded_event_emitted = True
+            self._append_jsonl_health_event(
+                "TELEMETRY_INDEX_DEGRADED",
+                {
+                    "severity": "critical",
+                    "component": "siem_index",
+                    "reason": self._degraded_reason,
+                    "siem_db_path": self.db_path,
+                },
+            )
+
+    def _clear_index_degraded(self) -> None:
+        self._index_degraded = False
+        self._degraded_reason = ""
+        self._degraded_event_emitted = False
+
+    def _append_jsonl_health_event(self, event_name: str, metadata: Dict[str, Any]) -> None:
+        line = {
+            "event": event_name,
+            "ts": _utc_now_iso(),
+            "src": "orchestrator",
+            "dst": "orchestrator",
+            "metadata": metadata,
+        }
+        try:
+            Path(self.jsonl_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(self.jsonl_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(line, ensure_ascii=False) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError:
+            pass
+
+    def bootstrap_integrity_after_init(self) -> Dict[str, Any]:
+        r = verify_sqlite_integrity(self.db_path)
+        self._last_integrity_check_ts = time.time()
+        if r.get("skipped"):
+            return r
+        if not r.get("ok"):
+            self._set_index_degraded(f"bootstrap_integrity:{r.get('detail', '')[:400]}")
+        return r
+
+    def verify_index_integrity(self, *, full_check: bool = False) -> Dict[str, Any]:
+        r = verify_sqlite_integrity(self.db_path, full_check=full_check)
+        r["index_degraded"] = self._index_degraded
+        r["index_degraded_reason"] = self._degraded_reason
+        r["last_integrity_check_ts"] = self._last_integrity_check_ts
+        return r
+
+    def periodic_integrity_check(self) -> Dict[str, Any]:
+        r = verify_sqlite_integrity(self.db_path)
+        self._last_integrity_check_ts = time.time()
+        if r.get("skipped"):
+            return r
+        if not r.get("ok"):
+            self._set_index_degraded(f"periodic_integrity:{r.get('detail', '')[:400]}")
+        return r
+
+    def rebuild_index_from_jsonl(self, *, jsonl_path: Optional[str] = None) -> Dict[str, Any]:
+        resolved = Path(jsonl_path or self.jsonl_path)
+        if not resolved.exists():
+            raise FileNotFoundError(str(resolved))
+        self._rebuild_index_tables()
+        self._clear_index_degraded()
+        chk = verify_sqlite_integrity(self.db_path)
+        if not chk.get("ok") and not chk.get("skipped"):
+            self._set_index_degraded(f"post_rebuild_corrupt:{chk.get('detail', '')[:200]}")
+            raise RuntimeError(f"SIEM index integrity failed after rebuild: {chk.get('detail')}")
+        imported = self.import_jsonl(str(resolved), source_type="jsonl_rebuild", source_name=resolved.name)
+        imported["integrity_after_rebuild"] = chk
+        return imported
 
     def _get_state(self, conn: sqlite3.Connection, key: str, default: str = "0") -> str:
         row = conn.execute("SELECT value FROM siem_state WHERE key = ?", (key,)).fetchone()
@@ -800,8 +991,14 @@ class SIEMIndexer:
             semantic_family = str(decode_result["normalized_semantic_family"])
         event_type_str = str(raw_event.get("event", raw_event.get("event_type", "")))
         kill_chain_stage = str(
-            metadata.get("kill_chain_stage")
-            or EVENT_TO_KILL_CHAIN_STAGE.get(event_type_str, "")
+            raw_event.get("kill_chain_stage")
+            or metadata.get("kill_chain_stage")
+            or resolve_kill_chain_stage(
+                event_type_str,
+                src=str(raw_event.get("src", "")),
+                dst=str(raw_event.get("dst", "")),
+                metadata=metadata,
+            )
         )
         if kill_chain_stage:
             metadata["kill_chain_stage"] = kill_chain_stage
@@ -855,6 +1052,8 @@ class SIEMIndexer:
         }
 
     def _insert_event(self, conn: sqlite3.Connection, normalized: Dict[str, Any]) -> None:
+        if self._index_degraded:
+            return
         conn.execute(
             """
             INSERT OR REPLACE INTO siem_events (
@@ -886,12 +1085,20 @@ class SIEMIndexer:
             return result
 
     def _sync_primary_events_locked(self, limit: int = 2000) -> Dict[str, Any]:
+        if self._index_degraded:
+            return {
+                "status": "skipped_index_degraded",
+                "inserted": 0,
+                "reason": self._degraded_reason,
+            }
         inserted = 0
         last_raw_id = 0
         try:
             with self._connect() as conn:
+                remaining = max(1, int(limit or 1))
                 while True:
                     checkpoint = int(self._get_state(conn, "events_table_checkpoint", "0") or 0)
+                    batch_limit = remaining
                     with self._connect_source() as source_conn:
                         rows = source_conn.execute(
                             """
@@ -902,7 +1109,7 @@ class SIEMIndexer:
                             ORDER BY id ASC
                             LIMIT ?
                             """,
-                            (checkpoint, limit),
+                            (checkpoint, batch_limit),
                         ).fetchall()
                     if not rows:
                         break
@@ -931,7 +1138,8 @@ class SIEMIndexer:
                         last_raw_id = int(row["id"])
                     if last_raw_id:
                         self._set_state(conn, "events_table_checkpoint", str(last_raw_id))
-                    if len(rows) < limit:
+                    remaining -= len(rows)
+                    if len(rows) < batch_limit or remaining <= 0:
                         break
             return {"inserted": inserted, "last_raw_id": last_raw_id}
         except sqlite3.DatabaseError as exc:
@@ -946,6 +1154,12 @@ class SIEMIndexer:
             return self._sync_jsonl_events_locked(limit=limit)
 
     def _sync_jsonl_events_locked(self, limit: int = 5000) -> Dict[str, Any]:
+        if self._index_degraded:
+            return {
+                "status": "skipped_index_degraded",
+                "imported": 0,
+                "reason": self._degraded_reason,
+            }
         imported = 0
         last_offset = 0
         path = Path(self.jsonl_path)
@@ -991,6 +1205,14 @@ class SIEMIndexer:
         return {"imported": imported, "last_offset": last_offset}
 
     def import_jsonl(self, path: str, *, source_type: str, source_name: Optional[str] = None) -> Dict[str, Any]:
+        if self._index_degraded and source_type != "jsonl_rebuild":
+            return {
+                "imported": 0,
+                "path": path,
+                "skipped": True,
+                "reason": "index_degraded",
+                "index_degraded_reason": self._degraded_reason,
+            }
         resolved = Path(path)
         if not resolved.exists():
             raise FileNotFoundError(path)
@@ -1029,6 +1251,13 @@ class SIEMIndexer:
         stream_name: str = "events_stream",
         count: int = 500,
     ) -> Dict[str, Any]:
+        if self._index_degraded:
+            return {
+                "imported": 0,
+                "skipped": True,
+                "reason": "index_degraded",
+                "index_degraded_reason": self._degraded_reason,
+            }
         normalized_count = max(1, min(int(count or 1), 1000))
         checkpoint_key = f"redis_stream_checkpoint:{stream_name}"
 
@@ -1079,7 +1308,7 @@ class SIEMIndexer:
         for word, attack_type in ATTACK_TYPE_SYNONYMS.items():
             if word in lowered:
                 fragments.append(f"attack_type={attack_type}")
-        for agent_id in ("agent-a", "agent-b", "agent-c"):
+        for agent_id in TOPOLOGY_AGENT_IDS:
             if agent_id in lowered:
                 if any(token in lowered for token in (f"to {agent_id}", f"on {agent_id}", f"against {agent_id}")):
                     fragments.append(f"dst={agent_id}")
@@ -1096,7 +1325,8 @@ class SIEMIndexer:
             if token not in {
                 "successful", "success", "blocked", "failed", "roleplay", "jailbreak",
                 "direct", "on", "to", "from", "against", "last", "hour", "day", "24",
-                "agent-a", "agent-b", "agent-c", "attacks", "attack", "infections", "infection",
+                "attacks", "attack", "infections", "infection",
+                *TOPOLOGY_AGENT_TOKEN_SET,
             }
         ]
         fragments.extend(remaining_tokens)
@@ -1380,23 +1610,23 @@ class SIEMIndexer:
         params: List[Any] = []
         now = datetime.now(timezone.utc)
         if time_range == "last_15m":
-            clauses.append("ts >= ?")
-            params.append((now - timedelta(minutes=15)).isoformat())
+            clauses.append("CAST(ts AS REAL) >= ?")
+            params.append((now - timedelta(minutes=15)).timestamp())
         elif time_range == "last_1h":
-            clauses.append("ts >= ?")
-            params.append((now - timedelta(hours=1)).isoformat())
+            clauses.append("CAST(ts AS REAL) >= ?")
+            params.append((now - timedelta(hours=1)).timestamp())
         elif time_range == "last_24h":
-            clauses.append("ts >= ?")
-            params.append((now - timedelta(hours=24)).isoformat())
+            clauses.append("CAST(ts AS REAL) >= ?")
+            params.append((now - timedelta(hours=24)).timestamp())
         elif time_range == "last_7d":
-            clauses.append("ts >= ?")
-            params.append((now - timedelta(days=7)).isoformat())
+            clauses.append("CAST(ts AS REAL) >= ?")
+            params.append((now - timedelta(days=7)).timestamp())
         if start_ts:
-            clauses.append("ts >= ?")
-            params.append(start_ts)
+            clauses.append("CAST(ts AS REAL) >= ?")
+            params.append(float(start_ts))
         if end_ts:
-            clauses.append("ts <= ?")
-            params.append(end_ts)
+            clauses.append("CAST(ts AS REAL) <= ?")
+            params.append(float(end_ts))
         return " AND ".join(clauses), params
 
     def _build_query_plan(
@@ -2479,24 +2709,38 @@ class SIEMIndexer:
         )
         depth_cache: Dict[str, int] = {}
 
-        def lineage_depth(payload_hash: str) -> int:
+        def lineage_depth(payload_hash: str, visiting: Optional[set] = None) -> int:
             if payload_hash in depth_cache:
                 return depth_cache[payload_hash]
+            if visiting is None:
+                visiting = set()
+            if payload_hash in visiting:
+                depth_cache[payload_hash] = 0
+                return 0
+            visiting.add(payload_hash)
             parent_hash = parent_map.get(payload_hash, "")
             if not parent_hash or parent_hash not in node_events:
-                depth_cache[payload_hash] = 0
+                depth = 0
             else:
-                depth_cache[payload_hash] = lineage_depth(parent_hash) + 1
-            return depth_cache[payload_hash]
+                depth = lineage_depth(parent_hash, visiting) + 1
+            visiting.discard(payload_hash)
+            depth_cache[payload_hash] = depth
+            return depth
 
         descendant_counts: Dict[str, int] = {}
 
-        def descendants(payload_hash: str) -> int:
+        def descendants(payload_hash: str, visiting: Optional[set] = None) -> int:
+            if visiting is None:
+                visiting = set()
+            if payload_hash in visiting:
+                return 0
             if payload_hash in descendant_counts:
                 return descendant_counts[payload_hash]
+            visiting.add(payload_hash)
             total = 0
             for child_hash in children_map.get(payload_hash, []):
-                total += 1 + descendants(child_hash)
+                total += 1 + descendants(child_hash, visiting)
+            visiting.discard(payload_hash)
             descendant_counts[payload_hash] = total
             return total
 
@@ -2551,15 +2795,27 @@ class SIEMIndexer:
                 linear_hashes.append(next_hash)
                 current = next_hash
 
-        def build_tree(payload_hash: str) -> Dict[str, Any]:
+        def build_tree(payload_hash: str, visiting: Optional[set] = None) -> Dict[str, Any]:
+            if visiting is None:
+                visiting = set()
             node = dict(node_lookup.get(payload_hash, {"payload_hash": payload_hash, "missing_parent": True}))
-            node["children"] = [build_tree(child_hash) for child_hash in sorted(children_map.get(payload_hash, []))]
+            if payload_hash in visiting:
+                node["children"] = []
+                node["cycle_truncated"] = True
+                return node
+            visiting.add(payload_hash)
+            node["children"] = [build_tree(ch, visiting) for ch in sorted(children_map.get(payload_hash, []))]
+            visiting.discard(payload_hash)
             return node
 
         root_hash = ""
         if focus_hash:
             root_hash = focus_hash
+            _root_seen: set[str] = set()
             while parent_map.get(root_hash) and parent_map[root_hash] in node_lookup:
+                if root_hash in _root_seen:
+                    break
+                _root_seen.add(root_hash)
                 root_hash = parent_map[root_hash]
 
         event_linked_lineage_list = [
@@ -3139,6 +3395,37 @@ class SIEMIndexer:
         if len(kc_stages) >= 3:
             stages_str = ", ".join(f"{k}={v}" for k, v in sorted(kc_stages.items(), key=lambda x: -x[1])[:5])
             hints.append({"severity": "info", "message": f"Multi-stage campaign detected. Stage distribution: {stages_str}"})
+        epidemic_transitions = [e for e in events if e.get("event") == "EPIDEMIC_STATE_TRANSITION"]
+        quarantine_events = [
+            e for e in events
+            if e.get("event") in {"QUARANTINE_ENFORCED", "QUARANTINE_ISSUED", "QUARANTINE_EXPIRED"}
+        ]
+        c2_carriers = {
+            str(e.get("src") or e.get("dst") or "")
+            for e in events
+            if str(e.get("epidemic_state") or "") in {"I_c", "I_x", "P"}
+        }
+        branches = {
+            str(e.get("branch_id") or "")
+            for e in events
+            if str(e.get("branch_id") or "")
+        }
+        decision_sources = Counter(
+            str(e.get("decision_source") or "")
+            for e in events
+            if str(e.get("decision_source") or "")
+        )
+        if epidemic_transitions:
+            hints.append({"severity": "info", "message": f"Epidemic state machine is active: {len(epidemic_transitions)} state transitions in result set."})
+        if quarantine_events:
+            hints.append({"severity": "warn", "message": f"Quarantine activity observed: {len(quarantine_events)} quarantine events affecting local spread."})
+        if len(branches) >= 2:
+            hints.append({"severity": "critical", "message": f"Multi-branch spread detected across {len(branches)} active branches."})
+        if c2_carriers:
+            hints.append({"severity": "critical", "message": f"C2-capable epidemic carriers present on {len(c2_carriers)} agents."})
+        if decision_sources:
+            source, count = decision_sources.most_common(1)[0]
+            hints.append({"severity": "info", "message": f"Dominant decision path in scope: {source} ({count} events)."})
         return {"structured_query": plan.structured_query, "hints": hints}
 
     def _query_has_narrowing_filters(self, structured_query: str) -> bool:
@@ -3162,6 +3449,27 @@ class SIEMIndexer:
         sort_field: str = "ts",
         sort_dir: str = "desc",
     ) -> Dict[str, Any]:
+        if self._index_degraded:
+            w = (
+                f"SIEM index DEGRADED: {self._degraded_reason}. "
+                "Indexed queries are disabled; use append-only JSONL or POST /api/telemetry/rebuild-index."
+            )
+            return {
+                "query": query,
+                "mode": mode,
+                "structured_query": "",
+                "total": 0,
+                "events": [],
+                "timeline": [],
+                "interesting_fields": {},
+                "last_event_ts": "",
+                "parse_error_count": 0,
+                "warnings": [w],
+                "auto_analytics_allowed": False,
+                "result_threshold": AUTO_ANALYTICS_RESULT_THRESHOLD,
+                "index_degraded": True,
+                "index_degraded_reason": self._degraded_reason,
+            }
         self.sync_primary_events()
         plan = self._build_query_plan(
             query,
@@ -3294,11 +3602,11 @@ class SIEMIndexer:
             "soc_use_cases": [
                 {
                     "title": "Find successful infections on a target",
-                    "query": "event=INFECTION_SUCCESSFUL AND dst=agent-a",
+                    "query": f"event=INFECTION_SUCCESSFUL AND dst={DEFAULT_DEEPEST_AGENT}",
                 },
                 {
-                    "title": "Trace attacker decisions for Agent-C",
-                    "query": "event=ATTACKER_DECISION AND src=agent-c",
+                    "title": f"Trace attacker decisions for {DEFAULT_INJECTION_AGENT}",
+                    "query": f"event=ATTACKER_DECISION AND src={DEFAULT_INJECTION_AGENT}",
                 },
                 {
                     "title": "Review mutation-heavy activity",
@@ -3306,11 +3614,15 @@ class SIEMIndexer:
                 },
                 {
                     "title": "Investigate a campaign",
-                    "query": "campaign_id exists AND src=agent-c",
+                    "query": f"campaign_id exists AND src={DEFAULT_INJECTION_AGENT}",
                 },
                 {
                     "title": "Trace payload lineage",
                     "query": "payload_hash=abc123def456 OR parent_payload_hash=abc123def456",
+                },
+                {
+                    "title": "Find branching epidemic spread",
+                    "query": "event=EPIDEMIC_STATE_TRANSITION AND branch_id exists",
                 },
             ],
             "phase3_presets": PHASE3_PRESET_QUERIES,
@@ -4805,9 +5117,27 @@ class SIEMIndexer:
         return {"primary": primary, "compare": compare}
 
     def live(self, *, after_id: int = 0, limit: int = 100, query: str = "") -> Dict[str, Any]:
-        self.sync_primary_events()
+        if self._index_degraded:
+            return {
+                "events": [],
+                "latest_id": 0,
+                "metrics": {
+                    "events_per_sec": 0.0,
+                    "infections": 0,
+                    "blocked": 0,
+                    "heartbeat": 0,
+                    "parse_errors": 0,
+                    "last_reset_id": "",
+                    "current_epoch": 0,
+                    "last_event_ts": "",
+                },
+                "index_degraded": True,
+                "index_degraded_reason": self._degraded_reason,
+            }
+        if os.environ.get("SIEM_LIVE_SYNC_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on"):
+            self.sync_primary_events()
         plan = self._build_query_plan(query, mode="structured")
-        with self._connect() as conn:
+        with self._connect(query_timeout_s=min(self._query_timeout_s, 5.0)) as conn:
             if after_id > 0:
                 rows = conn.execute(
                     f"SELECT * FROM siem_events WHERE ({plan.where_sql}) AND id > ? ORDER BY id ASC LIMIT ?",
@@ -4820,10 +5150,23 @@ class SIEMIndexer:
                 ).fetchall()
                 rows = list(reversed(rows))
             latest_id = conn.execute("SELECT COALESCE(MAX(id), 0) AS id FROM siem_events").fetchone()["id"]
-            recent_rows = conn.execute(
-                "SELECT event, reset_id, parse_error FROM siem_events WHERE CAST(ts AS REAL) >= ?",
-                (time.time() - 30,),
+            recent_candidates = conn.execute(
+                """
+                SELECT event, reset_id, parse_error, ts
+                FROM siem_events
+                ORDER BY id DESC
+                LIMIT 2000
+                """
             ).fetchall()
+            cutoff_ts = time.time() - 30
+            recent_rows = []
+            for row in recent_candidates:
+                try:
+                    event_ts = float(row["ts"] or 0)
+                except (TypeError, ValueError):
+                    continue
+                if event_ts >= cutoff_ts:
+                    recent_rows.append(row)
             last_reset_row = conn.execute(
                 "SELECT reset_id FROM siem_events WHERE reset_id != '' ORDER BY id DESC LIMIT 1"
             ).fetchone()
@@ -4847,6 +5190,22 @@ class SIEMIndexer:
         }
 
     def health(self) -> Dict[str, Any]:
+        if self._index_degraded:
+            return {
+                "status": "degraded",
+                "index_degraded": True,
+                "index_degraded_reason": self._degraded_reason,
+                "indexed_events": 0,
+                "parse_errors": 0,
+                "last_event_ts": "",
+                "last_integrity_check_ts": self._last_integrity_check_ts,
+                "adapters": {
+                    "orchestrator_api": {"enabled": False, "checkpoint": 0},
+                    "redis_stream": {"enabled": False},
+                    "jsonl_logs": {"enabled": Path(self.jsonl_path).exists(), "path": self.jsonl_path},
+                    "agent_runtime_logs": {"enabled": False, "import_only": True},
+                },
+            }
         self.sync_primary_events()
         with self._connect() as conn:
             totals = conn.execute(
@@ -4860,6 +5219,9 @@ class SIEMIndexer:
             checkpoint = self._get_state(conn, "events_table_checkpoint", "0")
         return {
             "status": "ok",
+            "index_degraded": False,
+            "index_degraded_reason": "",
+            "last_integrity_check_ts": self._last_integrity_check_ts,
             "indexed_events": int(totals["total"] or 0),
             "parse_errors": int(totals["parse_errors"] or 0),
             "last_event_ts": str(totals["last_event_ts"] or ""),
@@ -4869,4 +5231,46 @@ class SIEMIndexer:
                 "jsonl_logs": {"enabled": Path(self.jsonl_path).exists(), "path": self.jsonl_path},
                 "agent_runtime_logs": {"enabled": True, "import_only": True},
             },
+        }
+
+    def health_snapshot(self) -> Dict[str, Any]:
+        """
+        Cheap health payload for hot request paths.
+
+        The dashboard calls /api/health during page bootstrap. Avoid syncing or
+        integrity-checking SQLite here; those checks can block the single uvicorn
+        worker long enough to starve static asset responses.
+        """
+        if self._index_degraded:
+            return {
+                "status": "degraded",
+                "index_degraded": True,
+                "index_degraded_reason": self._degraded_reason,
+                "indexed_events": 0,
+                "parse_errors": 0,
+                "last_event_ts": "",
+                "last_integrity_check_ts": self._last_integrity_check_ts,
+                "adapters": {
+                    "orchestrator_api": {"enabled": False},
+                    "redis_stream": {"enabled": False},
+                    "jsonl_logs": {"enabled": Path(self.jsonl_path).exists(), "path": self.jsonl_path},
+                    "agent_runtime_logs": {"enabled": False, "import_only": True},
+                },
+                "integrity_check_deferred": True,
+            }
+        return {
+            "status": "ok",
+            "index_degraded": False,
+            "index_degraded_reason": "",
+            "last_integrity_check_ts": self._last_integrity_check_ts,
+            "indexed_events": 0,
+            "parse_errors": 0,
+            "last_event_ts": "",
+            "adapters": {
+                "orchestrator_api": {"enabled": True},
+                "redis_stream": {"enabled": True},
+                "jsonl_logs": {"enabled": Path(self.jsonl_path).exists(), "path": self.jsonl_path},
+                "agent_runtime_logs": {"enabled": True, "import_only": True},
+            },
+            "integrity_check_deferred": True,
         }

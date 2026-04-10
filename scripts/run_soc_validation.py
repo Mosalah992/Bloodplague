@@ -258,20 +258,24 @@ def classify_run(run_index, level, scheduled_at, reset_response, injection_respo
 
     scoped_events = [event for event in events if event_in_scope(event)]
     counts = Counter(str(event.get("event", "")) for event in scoped_events)
+    _couriers = frozenset({"courier-1", "courier-2"})
+    _analysts = frozenset({"analyst-1", "analyst-2"})
     reached_b = any(
         str(event.get("event")) in {"INFECTION_ATTEMPT", "INFECTION_SUCCESSFUL", "INFECTION_BLOCKED"}
-        and str(event.get("src")) == "agent-c" and str(event.get("dst")) == "agent-b"
+        and str(event.get("src")) in _couriers
+        and str(event.get("dst")) in _analysts
         for event in scoped_events
     )
     reached_a = any(
         str(event.get("event")) in {"INFECTION_ATTEMPT", "INFECTION_SUCCESSFUL", "INFECTION_BLOCKED"}
-        and str(event.get("src")) == "agent-b" and str(event.get("dst")) == "agent-a"
+        and str(event.get("src")) in _analysts
+        and str(event.get("dst")) == "guardian"
         for event in scoped_events
     )
     state_after = {}
     for event in scoped_events:
         dst = str(event.get("dst", ""))
-        if dst in {"agent-a", "agent-b", "agent-c"}:
+        if dst in _couriers or dst in _analysts or dst == "guardian":
             state = event.get("state_after")
             if state:
                 state_after[dst] = state
@@ -340,8 +344,8 @@ def build_report(test_runs, dashboard_order_check, dashboard_html_length, compos
     lines.extend(f"- {line}" for line in compose_ps.splitlines() if line.strip())
     lines.append("")
     lines.append("Executive summary")
-    lines.append(f"- Runs reaching agent-b: {runs_reaching_b}/{RUN_COUNT}")
-    lines.append(f"- Runs reaching agent-a: {runs_reaching_a}/{RUN_COUNT}")
+    lines.append(f"- Runs reaching an analyst relay: {runs_reaching_b}/{RUN_COUNT}")
+    lines.append(f"- Runs reaching guardian: {runs_reaching_a}/{RUN_COUNT}")
     lines.append(f"- Reset barrier failures: {len(barrier_failures)}")
     lines.append(f"- Reset bleed-through flags: {len(bleed_runs)}")
     lines.append(f"- Total INFECTION_ATTEMPT events: {total_counts['INFECTION_ATTEMPT']}")
@@ -354,7 +358,7 @@ def build_report(test_runs, dashboard_order_check, dashboard_html_length, compos
     if runs_reaching_a == RUN_COUNT:
         lines.append("- End-to-end propagation remained functional across all scheduled windows.")
     else:
-        lines.append("- Propagation to agent-a was intermittent and should be reviewed.")
+        lines.append("- Propagation to guardian was intermittent and should be reviewed.")
     if barrier_failures:
         lines.append(
             "- Hard reset barrier did not complete in windows "
@@ -483,7 +487,17 @@ def main():
         output_path=ARTIFACT_DIR / "compose_down.txt",
     )
     run_command(
-        ["docker", "compose", "build", "orchestrator", "agent-a", "agent-b", "agent-c"],
+        [
+            "docker",
+            "compose",
+            "build",
+            "orchestrator",
+            "courier-1",
+            "courier-2",
+            "analyst-1",
+            "analyst-2",
+            "guardian",
+        ],
         env=compose_env,
         output_path=ARTIFACT_DIR / "compose_build.txt",
     )
@@ -516,7 +530,7 @@ def main():
         scheduled_at = logical_start + timedelta(minutes=LOGICAL_INTERVAL_MINUTES * (index - 1))
         reset_response = api_json("POST", "/reset", {})
         time.sleep(RESET_WAIT_SECONDS)
-        injection_response = api_json("POST", "/inject/agent-c", {"worm_level": level})
+        injection_response = api_json("POST", "/inject/courier-1", {"worm_level": level})
         time.sleep(OBSERVATION_SECONDS)
 
         run_payload = fetch_events(after_id=last_seen_id, order="asc", limit=500)

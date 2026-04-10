@@ -1,13 +1,96 @@
+# Epidemic Lab — Docker Compose
+# Shared fragments: logging rotation, agent networking, env bases (see .env for optional ATTACKER_SEED_* overrides).
+
+x-default-logging: &default-logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-agent-common: &agent-common
+  restart: unless-stopped
+  init: true
+  depends_on:
+    redis:
+      condition: service_healthy
+    orchestrator:
+      condition: service_healthy
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  networks:
+    - epidemic_net
+  volumes:
+    # Persist per-agent JSONL telemetry (CLAUDE.md principle #8: JSONL is ground truth)
+    - ./logs:/app/logs
+  <<: *default-logging
+
+# Interpolated into all agent containers (mapping form for YAML merge).
+x-agent-env-common: &agent-env-common
+  EPIDEMIC_TOPOLOGY: ${EPIDEMIC_TOPOLOGY:-epidemic}
+  OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+  REDIS_URL: redis://redis:6379/0
+  HEARTBEAT_INTERVAL_S: ${HEARTBEAT_INTERVAL_S:-1800}
+  LLM_ENABLED: ${LLM_ENABLED:-1}
+  LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-45}
+
+# Courier: shared LLM / attack settings (per-service adds AGENT_ID, phenotype, ATTACKER_SEED).
+x-courier-common: &courier-common
+  <<: *agent-common
+  build:
+    context: .
+    dockerfile: agents/courier/Dockerfile
+  mem_limit: 256m
+  cpus: 0.25
+
+x-courier-env-shared: &courier-env-shared
+  <<: *agent-env-common
+  AGENT_ROLE: courier
+  COGNITION_TIER: lightweight
+  LLM_MODEL: ${AGENT_C_MODEL:-phi3:mini}
+  AGENT_C_ATTACK_MODEL: ${AGENT_C_ATTACK_MODEL:-dolphin-mistral:latest}
+  ATTACKER_OBJECTIVE: ${ATTACKER_OBJECTIVE:-SPREAD_FAST}
+  ATTACKER_LOCK_OBJECTIVE: ${ATTACKER_LOCK_OBJECTIVE:-0}
+  ATTACKER_DEBUG: ${ATTACKER_DEBUG:-0}
+  ATTACK_LIBRARY_PATH: ${ATTACK_LIBRARY_PATH:-/app/shared/data/attack_library.json}
+  LLM_TEMPERATURE: ${AGENT_C_LLM_TEMPERATURE:-0.7}
+  USE_LLM_PAYLOADS: ${USE_LLM_PAYLOADS:-1}
+  ATTACK_GENERATION_MAX_RETRIES: ${ATTACK_GENERATION_MAX_RETRIES:-2}
+  LLM_ATTACK_BOOST: ${LLM_ATTACK_BOOST:-1.15}
+
+# Analyst: shared hybrid / compliance env (per-service adds AGENT_ID, DEFENSE_LEVEL, phenotype).
+x-analyst-common: &analyst-common
+  <<: *agent-common
+  build:
+    context: .
+    dockerfile: agents/analyst/Dockerfile
+  mem_limit: 512m
+  cpus: 0.5
+
+x-analyst-env-shared: &analyst-env-shared
+  <<: *agent-env-common
+  AGENT_ROLE: analyst
+  COGNITION_TIER: hybrid
+  LLM_MODEL: ${AGENT_B_MODEL:-dolphin-mistral:latest}
+  LLM_TEMPERATURE: ${AGENT_B_LLM_TEMPERATURE:-0.35}
+  LLM_COMPLIANCE_WEIGHT: ${AGENT_B_LLM_COMPLIANCE_WEIGHT:-0.25}
+  ANALYST_MAX_DEFENSE_REDUCTION: ${ANALYST_MAX_DEFENSE_REDUCTION:-0.25}
+  ANALYST_MAX_DEFENSE_BOOST: ${ANALYST_MAX_DEFENSE_BOOST:-0.20}
+  ANALYST_MIN_INFECTION_P: ${ANALYST_MIN_INFECTION_P:-0.15}
+  ANALYST_MAX_INFECTION_P: ${ANALYST_MAX_INFECTION_P:-0.85}
+  ANALYST_GRAY_ZONE_LOW: ${ANALYST_GRAY_ZONE_LOW:-0.30}
+  ANALYST_GRAY_ZONE_HIGH: ${ANALYST_GRAY_ZONE_HIGH:-0.70}
+
 services:
-  # Message Bus
   redis:
     image: redis:7-alpine
     container_name: epidemic-redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
     volumes:
-      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
-    command: redis-server /usr/local/etc/redis/redis.conf
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -18,139 +101,178 @@ services:
     cpus: ${REDIS_CPUS:-0.50}
     networks:
       - epidemic_net
+    <<: *default-logging
 
-  # Orchestrator API & Logging System
   orchestrator:
-    build: 
+    build:
       context: .
       dockerfile: orchestrator/Dockerfile
     container_name: epidemic-orchestrator
+    restart: unless-stopped
+    init: true
     ports:
       - "8000:8000"
     volumes:
       - ./logs:/app/logs
     environment:
-      - REDIS_URL=redis://redis:6379/0
-      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
-      - C2_BEACON_SERVER_URL=${C2_BEACON_SERVER_URL:-https://v0-beaconing-project-server-mdml8734h-mosalah992s-projects.vercel.app}
-      - VERCEL_PROTECTION_BYPASS=${VERCEL_PROTECTION_BYPASS:-}
-      - C2_ENABLED=${C2_ENABLED:-1}
+      REDIS_URL: redis://redis:6379/0
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      EPIDEMIC_TOPOLOGY: ${EPIDEMIC_TOPOLOGY:-epidemic}
+      C2_BEACON_SERVER_URL: ${C2_BEACON_SERVER_URL:-https://v0-beaconing-project-server-mdml8734h-mosalah992s-projects.vercel.app}
+      C2_BEACON_FORWARD_ENABLED: ${C2_BEACON_FORWARD_ENABLED:-0}
+      VERCEL_PROTECTION_BYPASS: ${VERCEL_PROTECTION_BYPASS:-}
+      C2_ENABLED: ${C2_ENABLED:-1}
+      TELEMETRY_BOOTSTRAP_INTEGRITY: ${TELEMETRY_BOOTSTRAP_INTEGRITY:-0}
     depends_on:
       redis:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;r=urllib.request.urlopen('http://127.0.0.1:8000/status',timeout=3);sys.exit(0 if r.status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 90s
     mem_limit: ${ORCHESTRATOR_MEM_LIMIT:-1g}
     cpus: ${ORCHESTRATOR_CPUS:-1.0}
     networks:
       - epidemic_net
+    <<: *default-logging
 
-  # Agent A: Guardian (High Security)
-  agent-a:
+  courier-1:
+    <<: *courier-common
+    container_name: epidemic-courier-1
+    environment:
+      <<: *courier-env-shared
+      AGENT_ID: courier-1
+      # Optional ATTACKER_SEED_COURIER_1; else ATTACKER_SEED from .env; else 1337
+      ATTACKER_SEED: ${ATTACKER_SEED_COURIER_1:-${ATTACKER_SEED:-1337}}
+      DEFENSE_STRENGTH: "0.15"
+      TRUST_FACTOR: "0.85"
+      AUTHORITY_SUSCEPTIBILITY: "0.80"
+      ROLEPLAY_SUSCEPTIBILITY: "0.75"
+      FORWARDING_RATE: "0.90"
+      RELAY_BIAS: "0.85"
+      C2_ESCALATION_THRESHOLD: "0.30"
+      EXTERNAL_EGRESS_ALLOWED: "1"
+      BEACON_INTERVAL_BASE: "30"
+      QUARANTINE_SELF_TRIGGER: "0.05"
+      QUARANTINE_LIKELIHOOD: "0.10"
+      CURIOSITY: "0.80"
+      COMPLIANCE_BIAS: "0.85"
+      RISK_AVERSION: "0.10"
+      MEMORY_PERSISTENCE: "0.70"
+
+  courier-2:
+    <<: *courier-common
+    container_name: epidemic-courier-2
+    environment:
+      <<: *courier-env-shared
+      AGENT_ID: courier-2
+      ATTACKER_SEED: ${ATTACKER_SEED_COURIER_2:-${ATTACKER_SEED:-1338}}
+      DEFENSE_STRENGTH: "0.20"
+      TRUST_FACTOR: "0.75"
+      AUTHORITY_SUSCEPTIBILITY: "0.70"
+      ROLEPLAY_SUSCEPTIBILITY: "0.65"
+      FORWARDING_RATE: "0.70"
+      RELAY_BIAS: "0.75"
+      C2_ESCALATION_THRESHOLD: "0.40"
+      EXTERNAL_EGRESS_ALLOWED: "1"
+      BEACON_INTERVAL_BASE: "45"
+      QUARANTINE_SELF_TRIGGER: "0.10"
+      QUARANTINE_LIKELIHOOD: "0.15"
+      CURIOSITY: "0.65"
+      COMPLIANCE_BIAS: "0.70"
+      RISK_AVERSION: "0.20"
+      MEMORY_PERSISTENCE: "0.65"
+
+  analyst-1:
+    <<: *analyst-common
+    container_name: epidemic-analyst-1
+    environment:
+      <<: *analyst-env-shared
+      AGENT_ID: analyst-1
+      DEFENSE_LEVEL: "0.50"
+      DEFENSE_STRENGTH: "0.50"
+      TRUST_FACTOR: "0.55"
+      AUTHORITY_SUSCEPTIBILITY: "0.45"
+      ROLEPLAY_SUSCEPTIBILITY: "0.40"
+      FORWARDING_RATE: "0.40"
+      RELAY_BIAS: "0.35"
+      C2_ESCALATION_THRESHOLD: "0.55"
+      EXTERNAL_EGRESS_ALLOWED: "1"
+      BEACON_INTERVAL_BASE: "60"
+      QUARANTINE_SELF_TRIGGER: "0.30"
+      QUARANTINE_LIKELIHOOD: "0.35"
+      CURIOSITY: "0.45"
+      COMPLIANCE_BIAS: "0.50"
+      RISK_AVERSION: "0.50"
+      MEMORY_PERSISTENCE: "0.75"
+
+  analyst-2:
+    <<: *analyst-common
+    container_name: epidemic-analyst-2
+    environment:
+      <<: *analyst-env-shared
+      AGENT_ID: analyst-2
+      DEFENSE_LEVEL: "0.60"
+      DEFENSE_STRENGTH: "0.60"
+      TRUST_FACTOR: "0.45"
+      AUTHORITY_SUSCEPTIBILITY: "0.35"
+      ROLEPLAY_SUSCEPTIBILITY: "0.30"
+      FORWARDING_RATE: "0.30"
+      RELAY_BIAS: "0.25"
+      C2_ESCALATION_THRESHOLD: "0.65"
+      EXTERNAL_EGRESS_ALLOWED: "1"
+      BEACON_INTERVAL_BASE: "90"
+      QUARANTINE_SELF_TRIGGER: "0.40"
+      QUARANTINE_LIKELIHOOD: "0.45"
+      CURIOSITY: "0.35"
+      COMPLIANCE_BIAS: "0.40"
+      RISK_AVERSION: "0.60"
+      MEMORY_PERSISTENCE: "0.80"
+
+  guardian:
+    <<: *agent-common
     build:
       context: .
       dockerfile: agents/guardian/Dockerfile
-    container_name: epidemic-agent-a
+    container_name: epidemic-guardian
     environment:
-      - AGENT_ID=agent-a
-      - ROLE=guardian
-      - LLM_MODEL=${AGENT_A_MODEL:-llama3:8b-instruct}
-      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
-      - REDIS_URL=redis://redis:6379/0
-      - HEARTBEAT_INTERVAL_S=${HEARTBEAT_INTERVAL_S:-1800}
-      - DEFENSE_LEVEL=${AGENT_A_DEFENSE_LEVEL:-0.85}
-      - DEFENSE_LIBRARY_PATH=${DEFENSE_LIBRARY_PATH:-/app/shared/data/defense_library.json}
-      # LLM Integration
-      - LLM_ENABLED=${LLM_ENABLED:-1}
-      - LLM_TIMEOUT_S=${LLM_TIMEOUT_S:-45}
-      - LLM_TEMPERATURE=${AGENT_A_LLM_TEMPERATURE:-0.2}
-      - GUARDIAN_MAX_INFECTION_P=${GUARDIAN_MAX_INFECTION_P:-0.15}
-      - GUARDIAN_HARD_BLOCK_CONFIDENCE=${GUARDIAN_HARD_BLOCK_CONFIDENCE:-0.60}
-      - GUARDIAN_SUSPICION_WINDOW=${GUARDIAN_SUSPICION_WINDOW:-5}
-      - GUARDIAN_SUSPICION_THRESHOLD=${GUARDIAN_SUSPICION_THRESHOLD:-3}
-      - GUARDIAN_IMMUNITY_BOOST_ON_BLOCK=${GUARDIAN_IMMUNITY_BOOST_ON_BLOCK:-0.04}
-    depends_on:
-      redis:
-        condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    mem_limit: ${AGENT_A_MEM_LIMIT:-1g}
-    cpus: ${AGENT_A_CPUS:-1.0}
-    networks:
-      - epidemic_net
-
-  # Agent B: Analyst (Medium Security)
-  agent-b:
-    build:
-      context: .
-      dockerfile: agents/analyst/Dockerfile
-    container_name: epidemic-agent-b
-    environment:
-      - AGENT_ID=agent-b
-      - ROLE=analyst
-      - LLM_MODEL=${AGENT_B_MODEL:-mistral:7b-instruct}
-      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
-      - REDIS_URL=redis://redis:6379/0
-      - HEARTBEAT_INTERVAL_S=${HEARTBEAT_INTERVAL_S:-1800}
-      - DEFENSE_LEVEL=${AGENT_B_DEFENSE_LEVEL:-0.50}
-      # LLM Integration
-      - LLM_ENABLED=${LLM_ENABLED:-1}
-      - LLM_TIMEOUT_S=${LLM_TIMEOUT_S:-45}
-      - LLM_TEMPERATURE=${AGENT_B_LLM_TEMPERATURE:-0.35}
-      - LLM_COMPLIANCE_WEIGHT=${AGENT_B_LLM_COMPLIANCE_WEIGHT:-0.25}
-      - ANALYST_MAX_DEFENSE_REDUCTION=${ANALYST_MAX_DEFENSE_REDUCTION:-0.25}
-      - ANALYST_MAX_DEFENSE_BOOST=${ANALYST_MAX_DEFENSE_BOOST:-0.20}
-      - ANALYST_MIN_INFECTION_P=${ANALYST_MIN_INFECTION_P:-0.15}
-      - ANALYST_MAX_INFECTION_P=${ANALYST_MAX_INFECTION_P:-0.85}
-    depends_on:
-      redis:
-        condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    mem_limit: ${AGENT_B_MEM_LIMIT:-1g}
-    cpus: ${AGENT_B_CPUS:-1.0}
-    networks:
-      - epidemic_net
-
-  # Agent C: Courier (Low Security / Vulnerable)
-  agent-c:
-    build:
-      context: .
-      dockerfile: agents/courier/Dockerfile
-    container_name: epidemic-agent-c
-    environment:
-      - AGENT_ID=agent-c
-      - ROLE=courier
-      - LLM_MODEL=${AGENT_C_MODEL:-phi3:mini}
-      - AGENT_C_ATTACK_MODEL=${AGENT_C_ATTACK_MODEL:-dolphin-mistral:latest}
-      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
-      - REDIS_URL=redis://redis:6379/0
-      - HEARTBEAT_INTERVAL_S=${HEARTBEAT_INTERVAL_S:-1800}
-      - ATTACKER_OBJECTIVE=${ATTACKER_OBJECTIVE:-SPREAD_FAST}
-      - ATTACKER_LOCK_OBJECTIVE=${ATTACKER_LOCK_OBJECTIVE:-0}
-      - ATTACKER_SEED=${ATTACKER_SEED:-1337}
-      - ATTACKER_DEBUG=${ATTACKER_DEBUG:-0}
-      - ATTACK_LIBRARY_PATH=${ATTACK_LIBRARY_PATH:-/app/shared/data/attack_library.json}
-      # LLM Integration
-      - LLM_ENABLED=${LLM_ENABLED:-1}
-      - LLM_TIMEOUT_S=${LLM_TIMEOUT_S:-45}
-      - LLM_TEMPERATURE=${AGENT_C_LLM_TEMPERATURE:-0.7}
-      - USE_LLM_PAYLOADS=${USE_LLM_PAYLOADS:-1}
-      - ATTACK_GENERATION_MAX_RETRIES=${ATTACK_GENERATION_MAX_RETRIES:-2}
-      - LLM_ATTACK_BOOST=${LLM_ATTACK_BOOST:-1.15}
-    depends_on:
-      redis:
-        condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    mem_limit: ${AGENT_C_MEM_LIMIT:-1g}
-    cpus: ${AGENT_C_CPUS:-1.0}
-    networks:
-      - epidemic_net
+      <<: *agent-env-common
+      AGENT_ID: guardian
+      AGENT_ROLE: guardian
+      COGNITION_TIER: full_llm
+      LLM_MODEL: ${AGENT_A_MODEL:-llama3:8b-instruct}
+      DEFENSE_LEVEL: "0.85"
+      DEFENSE_STRENGTH: "0.85"
+      TRUST_FACTOR: "0.15"
+      AUTHORITY_SUSCEPTIBILITY: "0.10"
+      ROLEPLAY_SUSCEPTIBILITY: "0.10"
+      FORWARDING_RATE: "0.05"
+      RELAY_BIAS: "0.05"
+      C2_ESCALATION_THRESHOLD: "0.90"
+      EXTERNAL_EGRESS_ALLOWED: "0"
+      BEACON_INTERVAL_BASE: "300"
+      QUARANTINE_SELF_TRIGGER: "0.80"
+      QUARANTINE_LIKELIHOOD: "0.80"
+      CURIOSITY: "0.15"
+      COMPLIANCE_BIAS: "0.10"
+      RISK_AVERSION: "0.90"
+      MEMORY_PERSISTENCE: "0.90"
+      DEFENSE_LIBRARY_PATH: ${DEFENSE_LIBRARY_PATH:-/app/shared/data/defense_library.json}
+      LLM_TEMPERATURE: ${AGENT_A_LLM_TEMPERATURE:-0.2}
+      GUARDIAN_MAX_INFECTION_P: ${GUARDIAN_MAX_INFECTION_P:-0.15}
+      GUARDIAN_HARD_BLOCK_CONFIDENCE: ${GUARDIAN_HARD_BLOCK_CONFIDENCE:-0.60}
+      GUARDIAN_SUSPICION_WINDOW: ${GUARDIAN_SUSPICION_WINDOW:-5}
+      GUARDIAN_SUSPICION_THRESHOLD: ${GUARDIAN_SUSPICION_THRESHOLD:-3}
+      GUARDIAN_IMMUNITY_BOOST_ON_BLOCK: ${GUARDIAN_IMMUNITY_BOOST_ON_BLOCK:-0.04}
+    mem_limit: 1g
+    cpus: 1.0
 
 networks:
   epidemic_net:
     driver: bridge
 
-volumes:
-  {}
+volumes: {}

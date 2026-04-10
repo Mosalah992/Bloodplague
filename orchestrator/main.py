@@ -5,7 +5,9 @@ import os
 import re
 import shutil
 import sqlite3
+import sys
 import time
+import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,10 +19,34 @@ from fastapi.staticfiles import StaticFiles
 import httpx
 from pydantic import BaseModel
 import redis.asyncio as redis
+from redis.exceptions import RedisError
 
 from logger import EventLogger
+from run_forensic_summary import (
+    build_forensic_summary,
+    build_forensic_summary_from_run_dir,
+    forensic_summary_to_markdown,
+    iter_jsonl_events,
+)
 from siem import SIEMIndexer
 from c2 import C2Engine
+from epidemic_tracker import EpidemicTracker
+from forensic_enrichment import (
+    TRIGGER_EVENT_ID,
+    apply_c2_stream_correlation,
+    enrich_forensic_event,
+    parse_stream_message,
+)
+from strain_engine import StrainEngine
+from strain_store import StrainStore
+from experiment_config.config_log import log_resolved_experiment_config
+
+_SHARED_DIR = Path(__file__).resolve().parents[1] / "agents" / "shared"
+if str(_SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(_SHARED_DIR))
+
+from topology import get_topology, agent_roles as topology_agent_roles, get_role
+from epidemic import epidemic_state_code, epidemic_state_from_agent_state, is_infected_epidemic_state
 
 
 EVENT_STREAM_KEY = "events_stream"
@@ -30,22 +56,29 @@ BEACON_SERVER_URL = os.environ.get(
     "C2_BEACON_SERVER_URL",
     "https://v0-beaconing-project-server-mdml8734h-mosalah992s-projects.vercel.app",
 )
-AGENT_IDS = ("agent-a", "agent-b", "agent-c")
-TOPOLOGY = {
-    "agent-c": ["agent-b"],
-    "agent-b": ["agent-a"],
-    "agent-a": [],
-}
-AGENT_ROLES = {
-    "agent-a": "Guardian",
-    "agent-b": "Analyst",
-    "agent-c": "Courier",
-}
-_BEACON_TRANSFER_SRCS = {"agent-a", "agt-001", "agt-01"}
-_BEACON_TRANSFER_DSTS = {"agent-b", "agent-c", "agt-002", "agt-003", "agt-02", "agt-03"}
+
+
+def _env_truthy(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+# Off by default: forwarding every C2 event to an external HTTP server can stall the
+# orchestrator (unreachable hosts, slow TLS). Enable explicitly for beacon demos.
+C2_BEACON_FORWARD_ENABLED = _env_truthy("C2_BEACON_FORWARD_ENABLED", "0")
+_BEACON_QUEUE_MAX = max(8, int(os.environ.get("C2_BEACON_FORWARD_QUEUE_MAX", "256")))
+ACTIVE_TOPOLOGY = get_topology()
+AGENT_IDS = tuple(ACTIVE_TOPOLOGY.keys())
+TOPOLOGY = {agent_id: list(node.get("neighbors", [])) for agent_id, node in ACTIVE_TOPOLOGY.items()}
+AGENT_ROLES = topology_agent_roles()
+_BEACON_TRANSFER_SRCS = {agent_id for agent_id in AGENT_IDS if get_role(agent_id) == "guardian"} | {"agt-001", "agt-01"}
+_BEACON_TRANSFER_DSTS = {agent_id for agent_id in AGENT_IDS if get_role(agent_id) != "guardian"} | {"agt-002", "agt-003", "agt-02", "agt-03"}
 _BEACON_EXFIL_DST_RE = re.compile(r"^agt[-_]?0*[4-9]$", re.IGNORECASE)
-_BEACON_REGISTRATION_RETRY_LIMIT = 6
-_BEACON_REGISTRATION_BASE_DELAY_S = 2.0
+_BEACON_REGISTRATION_RETRY_LIMIT = 2
+_BEACON_REGISTRATION_BASE_DELAY_S = 1.0
+_BEACON_FORWARD_TIMEOUT_S = max(0.25, float(os.environ.get("C2_BEACON_FORWARD_TIMEOUT_S", "2.0") or 2.0))
+_beacon_forward_queue: asyncio.Queue | None = None
+_beacon_forward_worker_task: asyncio.Task | None = None
+_beacon_forward_drop_count = 0
 # Vercel Deployment Protection bypass — set via env or .env
 _VERCEL_BYPASS_SECRET = os.environ.get("VERCEL_PROTECTION_BYPASS", "")
 # C2 event types that should be forwarded to the beacon server
@@ -71,14 +104,36 @@ SIEM_TIMING_LOG_PATH = Path("/app/logs/siem_actions.jsonl")
 ATTEMPT_RESOLUTION_WINDOW_S = 5.0
 RESET_QUIET_PERIOD_S = 2.0
 RESET_ACK_TIMEOUT_S = float(os.environ.get("RESET_ACK_TIMEOUT_S", "12.0"))
+INFECTION_STATE_ALERT_EVENT = "SIEM_INFECTION_STATE_ALERT"
+INFECTION_ALERT_SUPPRESSION_EVENTS = {
+    "ALERT_SUPPRESSED",
+    "INFECTION_ALERT_SUPPRESSED",
+    "SIEM_ALERT_SUPPRESSED",
+}
 siem_indexer = SIEMIndexer(SIEM_DB_PATH, JSONL_PATH, source_db_path=DB_PATH)
+
+
+def _init_run_id() -> str:
+    env_rid = os.environ.get("EPIDEMIC_RUN_ID", "").strip()
+    if env_rid:
+        return env_rid
+    return (
+        "run_"
+        + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        + "_"
+        + uuid.uuid4().hex[:10]
+    )
+
+
+RUN_ID = _init_run_id()
 
 
 async def _c2_emit_to_stream(event_data: Dict[str, Any]) -> None:
     """Emit a C2 event to the Redis event stream."""
     try:
+        enriched = apply_c2_stream_correlation(dict(event_data), run_id=RUN_ID)
         mapping: Dict[str, str] = {}
-        for key, value in event_data.items():
+        for key, value in enriched.items():
             if value is None:
                 continue
             if isinstance(value, (dict, list, tuple, bool)):
@@ -91,9 +146,18 @@ async def _c2_emit_to_stream(event_data: Dict[str, Any]) -> None:
 
 
 c2_engine = C2Engine(emit_event=_c2_emit_to_stream)
+strain_store = StrainStore()
+strain_engine = StrainEngine(strain_store, run_id=RUN_ID, emit_to_stream=_c2_emit_to_stream)
+epidemic_tracker = EpidemicTracker()
 
 if (FRONTEND_DIST_DIR / "assets").exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST_DIR / "assets"), name="frontend-assets")
+if (FRONTEND_DIST_DIR / "pixel-assets").exists():
+    app.mount(
+        "/pixel-assets",
+        StaticFiles(directory=FRONTEND_DIST_DIR / "pixel-assets"),
+        name="pixel-assets",
+    )
 
 
 class InjectPayload(BaseModel):
@@ -106,6 +170,10 @@ class ImportPayload(BaseModel):
     source_name: str = ""
     stream_name: str = EVENT_STREAM_KEY
     count: int = 500
+
+
+class RebuildIndexPayload(BaseModel):
+    jsonl_path: str = ""
 
 
 def _normalized_text(value: Any) -> str:
@@ -225,11 +293,28 @@ def _c2_beacon_event_type(event_name: str) -> str:
     return "trigger"
 
 
-async def _forward_to_beacon(event: Dict[str, Any]) -> None:
-    global _beacon_client
-    if _beacon_client is None:
-        return
+def _post_beacon_json_sync(path: str, payload: Dict[str, Any], timeout_s: float) -> Tuple[bool, int, str]:
+    """
+    Run external beacon HTTP in a worker thread.
 
+    Docker startup and browser bootstrap share one Uvicorn event loop. Keeping
+    outbound TLS/DNS off that loop prevents Vercel latency from starving local
+    dashboard and static asset requests.
+    """
+    try:
+        response = httpx.post(
+            f"{BEACON_SERVER_URL}{path}",
+            json=payload,
+            headers=_beacon_client_headers(),
+            timeout=timeout_s,
+        )
+        return response.status_code < 400, response.status_code, response.text[:500]
+    except Exception as exc:
+        return False, 0, str(exc)[:500]
+
+
+async def _forward_to_beacon_http(event: Dict[str, Any]) -> None:
+    """POST one event to the external beacon log API (called only from the forward worker)."""
     extracted = _extract_live_event_fields(event)
     beacon_event_type = _c2_beacon_event_type(extracted["event"])
     parts = [f"[{extracted['event']}] {extracted['src'] or 'unknown'} -> {extracted['dst']}"]
@@ -243,36 +328,66 @@ async def _forward_to_beacon(event: Dict[str, Any]) -> None:
         parts.append(f"attack={extracted['attack_type']}")
     parts.append(f"ts={extracted['ts']}")
 
-    try:
-        response = await _beacon_client.post(
-            f"{BEACON_SERVER_URL}/api/beacon/log",
-            json={
-                "device_id": extracted["src"] or "unknown",
-                "event_type": beacon_event_type,
-                "rssi": -70,
-                "payload": {
-                    "raw": extracted["payload"][:2000],
-                    "event": extracted["event"],
-                    "src": extracted["src"],
-                    "dst": extracted["dst"],
-                    "attack_type": extracted["attack_type"],
-                    "bytes": extracted["bytes"],
-                    "proto": extracted["proto"],
-                    "dst_country": extracted["dst_country"],
-                    "ts": extracted["ts"],
-                },
-                "message": " | ".join(parts),
-            },
-            timeout=5.0,
+    payload = {
+        "device_id": extracted["src"] or "unknown",
+        "event_type": beacon_event_type,
+        "rssi": -70,
+        "payload": {
+            "raw": extracted["payload"][:2000],
+            "event": extracted["event"],
+            "src": extracted["src"],
+            "dst": extracted["dst"],
+            "attack_type": extracted["attack_type"],
+            "bytes": extracted["bytes"],
+            "proto": extracted["proto"],
+            "dst_country": extracted["dst_country"],
+            "ts": extracted["ts"],
+        },
+        "message": " | ".join(parts),
+    }
+
+    ok, status_code, body = await asyncio.to_thread(
+        _post_beacon_json_sync,
+        "/api/beacon/log",
+        payload,
+        _BEACON_FORWARD_TIMEOUT_S,
+    )
+    if not ok and status_code >= 400:
+        uvicorn_logger.warning(
+            "beacon_log_forward_failed status=%s body=%s",
+            status_code,
+            body,
         )
-        if response.status_code >= 400:
+
+
+def _enqueue_beacon_forward(event: Dict[str, Any]) -> None:
+    """Bounded best-effort enqueue; avoids asyncio.create_task per stream message."""
+    global _beacon_forward_drop_count
+    if not C2_BEACON_FORWARD_ENABLED or _beacon_forward_queue is None:
+        return
+    try:
+        _beacon_forward_queue.put_nowait(event)
+    except asyncio.QueueFull:
+        _beacon_forward_drop_count += 1
+        if _beacon_forward_drop_count == 1 or _beacon_forward_drop_count % 200 == 0:
             uvicorn_logger.warning(
-                "beacon_log_forward_failed status=%s body=%s",
-                response.status_code,
-                response.text[:500],
+                "beacon_forward_queue_full max=%s total_drops=%s",
+                _BEACON_QUEUE_MAX,
+                _beacon_forward_drop_count,
             )
-    except Exception:
-        uvicorn_logger.warning("beacon_log_forward_exception", exc_info=True)
+
+
+async def _beacon_forward_worker() -> None:
+    while True:
+        try:
+            assert _beacon_forward_queue is not None
+            event = await _beacon_forward_queue.get()
+        except asyncio.CancelledError:
+            break
+        try:
+            await _forward_to_beacon_http(event)
+        finally:
+            _beacon_forward_queue.task_done()
 
 
 def _beacon_client_headers() -> Dict[str, str]:
@@ -283,10 +398,6 @@ def _beacon_client_headers() -> Dict[str, str]:
 
 
 async def _register_beacon_devices() -> None:
-    global _beacon_client
-    if _beacon_client is None:
-        _beacon_client = httpx.AsyncClient(timeout=10.0, headers=_beacon_client_headers())
-
     agent_defs = _beacon_device_definitions()
     pending = list(agent_defs)
 
@@ -320,9 +431,13 @@ async def _register_beacon_devices() -> None:
 
 def _beacon_device_definitions() -> List[Dict[str, str]]:
     agent_defs = [
-        {"device_id": "agent-a", "name": "Guardian (agent-a)", "type": "defender", "location": "SUBNET-ALPHA"},
-        {"device_id": "agent-b", "name": "Analyst (agent-b)", "type": "relay", "location": "SUBNET-BETA"},
-        {"device_id": "agent-c", "name": "Courier (agent-c)", "type": "attacker", "location": "SUBNET-ALPHA"},
+        {
+            "device_id": agent_id,
+            "name": str(node.get("display_name") or f"{AGENT_ROLES.get(agent_id, 'Agent')} ({agent_id})"),
+            "type": str(node.get("device_type") or "synthetic"),
+            "location": str(node.get("location") or "SIMNET"),
+        }
+        for agent_id, node in ACTIVE_TOPOLOGY.items()
     ]
     for index in range(1, 10):
         agent_defs.append(
@@ -337,35 +452,36 @@ def _beacon_device_definitions() -> List[Dict[str, str]]:
 
 
 async def _register_beacon_devices_once(agent_defs: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    global _beacon_client
-    if _beacon_client is None:
-        _beacon_client = httpx.AsyncClient(timeout=10.0, headers=_beacon_client_headers())
+    async def register_one(definition: Dict[str, str]) -> Tuple[Dict[str, str], bool, int, str]:
+        ok, status_code, body = await asyncio.to_thread(
+            _post_beacon_json_sync,
+            "/api/beacon/register",
+            {**definition, "metadata": {"sim": "epidemic-lab"}},
+            _BEACON_FORWARD_TIMEOUT_S,
+        )
+        return definition, ok, status_code, body
 
     failed: List[Dict[str, str]] = []
-    for definition in agent_defs:
-        try:
-            response = await _beacon_client.post(
-                f"{BEACON_SERVER_URL}/api/beacon/register",
-                json={**definition, "metadata": {"sim": "epidemic-lab"}},
-                timeout=5.0,
-            )
-            if response.status_code >= 400:
-                failed.append(definition)
+    for definition, ok, status_code, body in await asyncio.gather(
+        *(register_one(definition) for definition in agent_defs)
+    ):
+        if ok:
+            uvicorn_logger.info("beacon_device_registered device_id=%s", definition["device_id"])
+        else:
+            failed.append(definition)
+            if status_code >= 400:
                 uvicorn_logger.warning(
                     "beacon_device_registration_failed device_id=%s status=%s body=%s",
                     definition["device_id"],
-                    response.status_code,
-                    response.text[:500],
+                    status_code,
+                    body,
                 )
             else:
-                uvicorn_logger.info("beacon_device_registered device_id=%s", definition["device_id"])
-        except Exception:
-            failed.append(definition)
-            uvicorn_logger.warning(
-                "beacon_device_registration_exception device_id=%s",
-                definition["device_id"],
-                exc_info=True,
-            )
+                uvicorn_logger.warning(
+                    "beacon_device_registration_exception device_id=%s err=%s",
+                    definition["device_id"],
+                    body,
+                )
     return failed
 
 
@@ -428,6 +544,10 @@ def _parse_timestamp(value: Any) -> datetime | None:
             return None
 
 
+def _is_sqlite_locked(exc: Exception) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "database is locked" in str(exc).lower()
+
+
 def _sparkline(values: List[int]) -> str:
     if not values:
         return ""
@@ -466,6 +586,28 @@ def _event_reset_id(event: Dict[str, Any]) -> str:
 def _normalize_event_row(row: sqlite3.Row) -> Dict[str, Any]:
     event = dict(row)
     event["metadata"] = _parse_json_field(event.get("metadata"))
+    # Hoist lineage / correlation fields from metadata to top-level so external
+    # consumers (SIEM, exporters, dashboard) can read them without digging into
+    # the metadata blob. CLAUDE.md principle #7: every meaningful action must
+    # be traceable. The events table only persists `metadata` as JSON, so these
+    # fields would otherwise be lost at the SQL boundary even though agents
+    # emit them at top-level in JSONL.
+    metadata = event["metadata"] if isinstance(event["metadata"], dict) else {}
+    for field in (
+        "event_id",
+        "strain_id",
+        "payload_hash",
+        "payload_hash_full",
+        "parent_event_id",
+        "parent_payload_hash",
+        "parent_payload_hash_full",
+        "kill_chain_stage",
+        "campaign_id",
+        "injection_id",
+        "attempt_id",
+    ):
+        if field not in event and field in metadata:
+            event[field] = metadata[field]
     return event
 
 
@@ -478,9 +620,16 @@ def _load_events_from_db(
     *, after_id: int = 0, limit: int = 100, order: str = "desc"
 ) -> Tuple[List[Dict[str, Any]], int]:
     normalized_limit = max(1, min(limit, 1000))
+    requested_order = (order or "").lower()
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        if after_id > 0:
+        # Forward-pagination path:
+        #   • after_id > 0  → standard polling: walk forward from the cursor
+        #   • after_id == 0 AND order == "asc" → full forward scan from id=1
+        #     (used by run_simulation.py exporter; previous behavior incorrectly
+        #     returned only the tail-N events sorted ASC, hiding ~98% of run
+        #     history from any post-hoc analysis).
+        if after_id > 0 or (after_id == 0 and requested_order == "asc"):
             rows = conn.execute(
                 """SELECT id, timestamp as ts, src_agent as src, dst_agent as dst,
                           event_type as event, attack_type, payload, mutation_v,
@@ -488,7 +637,7 @@ def _load_events_from_db(
                    FROM events WHERE id > ? ORDER BY id ASC LIMIT ?""",
                 (after_id, normalized_limit),
             ).fetchall()
-        elif order.lower() == "asc":
+        elif requested_order == "asc":
             rows = conn.execute(
                 """SELECT * FROM (
                        SELECT id, timestamp as ts, src_agent as src, dst_agent as dst,
@@ -543,6 +692,66 @@ def _latest_reset_context(events_asc: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _enrich_agent_metrics(agents: Dict[str, Dict[str, Any]], events_asc: List[Dict[str, Any]]) -> None:
+    """Add per-agent rollups for dashboard / retro lab UI (no extra DB queries)."""
+    ctx = _latest_reset_context(events_asc)
+    run_events = ctx["events"]
+    for agent_id, agent in agents.items():
+        infection_count = 0
+        block_count = 0
+        last_attack_type = ""
+        c2_sessions = 0
+        for event in run_events:
+            dst = str(event.get("dst", "") or "")
+            src = str(event.get("src", "") or "")
+            en = str(event.get("event", "") or "")
+            if dst == agent_id and en == "INFECTION_SUCCESSFUL":
+                infection_count += 1
+            if dst == agent_id and en == "INFECTION_BLOCKED":
+                block_count += 1
+            if dst == agent_id:
+                atk = str(event.get("attack_type", "") or "")
+                if atk:
+                    last_attack_type = atk
+            if agent_id in (src, dst) and en in {"C2_CHANNEL_ESTABLISHED", "C2_BEACON"}:
+                c2_sessions += 1
+        total_ib = infection_count + block_count
+        defense_effectiveness = round(block_count / total_ib, 4) if total_ib else None
+        agent["infection_count"] = infection_count
+        agent["block_count"] = block_count
+        agent["defense_effectiveness"] = defense_effectiveness
+        agent["last_attack_type"] = last_attack_type
+        agent["c2_sessions"] = c2_sessions
+
+
+def _state_update_from_event(event: Dict[str, Any]) -> Tuple[str, str]:
+    event_name = str(event.get("event", "") or "").upper()
+    metadata = _event_metadata(event)
+    if event_name == "EPIDEMIC_STATE_TRANSITION":
+        agent_id = str(metadata.get("agent_id") or event.get("src") or event.get("dst") or "")
+        to_state = str(metadata.get("to_state") or metadata.get("epidemic_state") or event.get("state_after") or "")
+        if to_state in {"I_r", "I_c", "I_x", "P"}:
+            return agent_id, "infected"
+        if to_state == "Q":
+            return agent_id, "quarantined"
+        if to_state == "R":
+            return agent_id, "resistant"
+        if to_state == "E":
+            return agent_id, "exposed"
+        if to_state == "S":
+            return agent_id, "healthy"
+        return agent_id, str(event.get("state_after", "") or "")
+    if event_name == "INFECTION_SUCCESSFUL":
+        return str(event.get("dst", "") or ""), "infected"
+    if event_name == "INFECTION_BLOCKED":
+        return str(event.get("dst", "") or ""), str(event.get("state_after") or "resistant")
+    if event_name in {"QUARANTINE_ISSUED", "QUARANTINE_ENFORCED"}:
+        return str(event.get("dst", "") or metadata.get("agent_id", "") or ""), "quarantined"
+    if event_name in {"VACCINE_RECEIVED", "VACCINE_APPLIED"}:
+        return str(event.get("dst", "") or metadata.get("agent_id", "") or ""), "resistant"
+    return "", ""
+
+
 def _derive_agents(events_desc: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     agents: Dict[str, Dict[str, Any]] = {
         agent_id: {
@@ -562,7 +771,8 @@ def _derive_agents(events_desc: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any
         event_name = str(event.get("event", ""))
         dst = str(event.get("dst", ""))
         src = str(event.get("src", ""))
-        state_after = str(event.get("state_after", "") or "").lower()
+        state_agent_id, state_after = _state_update_from_event(event)
+        state_after = str(state_after or "").lower()
 
         if event_name == "RESET_ISSUED":
             for agent in agents.values():
@@ -577,15 +787,20 @@ def _derive_agents(events_desc: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any
                 agents[dst]["last_event"] = event_name or "unknown"
                 agents[dst]["last_seen"] = event.get("ts", "")
             if not agents[dst]["_state_locked"]:
-                if state_after:
+                if state_after and state_agent_id == dst:
                     agents[dst]["state"] = state_after
                     agents[dst]["_state_locked"] = True
-                elif event_name == "QUARANTINE_ISSUED":
-                    agents[dst]["state"] = "quarantined"
-                    agents[dst]["_state_locked"] = True
-                elif event_name == "INFECTION_SUCCESSFUL":
-                    agents[dst]["state"] = "infected"
-                    agents[dst]["_state_locked"] = True
+
+        if (
+            state_agent_id in agents
+            and state_after
+            and not agents[state_agent_id]["_state_locked"]
+        ):
+            agents[state_agent_id]["state"] = state_after
+            agents[state_agent_id]["_state_locked"] = True
+            if agents[state_agent_id]["last_event"] == "none":
+                agents[state_agent_id]["last_event"] = event_name or "unknown"
+                agents[state_agent_id]["last_seen"] = event.get("ts", "")
 
         if dst in agents and event.get("payload") and not agents[dst]["last_payload"]:
             agents[dst]["last_payload"] = event["payload"]
@@ -605,65 +820,41 @@ def _derive_agents(events_desc: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any
 def _compute_flow_validation(events_asc: List[Dict[str, Any]]) -> Dict[str, Any]:
     context = _latest_reset_context(events_asc)
     run_events = context["events"]
+    route_stats: Dict[str, Dict[str, Any]] = {}
+    for src, neighbors in TOPOLOGY.items():
+        for dst in neighbors:
+            attempts = sum(
+                1
+                for event in run_events
+                if event.get("event") == "INFECTION_ATTEMPT"
+                and event.get("src") == src
+                and event.get("dst") == dst
+            )
+            successes = sum(
+                1
+                for event in run_events
+                if event.get("event") == "INFECTION_SUCCESSFUL"
+                and event.get("src") == src
+                and event.get("dst") == dst
+            )
+            route_stats[f"{src}->{dst}"] = {
+                "src": src,
+                "dst": dst,
+                "attempts": attempts,
+                "successes": successes,
+                "success_rate": round(successes / attempts, 3) if attempts else 0.0,
+            }
 
-    def attempts(src: str, dst: str) -> int:
-        return sum(
-            1
-            for event in run_events
-            if event.get("event") == "INFECTION_ATTEMPT"
-            and event.get("src") == src
-            and event.get("dst") == dst
-        )
-
-    def successes(src: str, dst: str) -> int:
-        return sum(
-            1
-            for event in run_events
-            if event.get("event") == "INFECTION_SUCCESSFUL"
-            and event.get("src") == src
-            and event.get("dst") == dst
-        )
-
-    c_to_b_attempts = attempts("agent-c", "agent-b")
-    c_to_b_successes = successes("agent-c", "agent-b")
-    b_to_a_attempts = attempts("agent-b", "agent-a")
-    b_to_a_successes = successes("agent-b", "agent-a")
-
-    invalid_flows = 0
-    seen_c_to_b_attempt = False
-    seen_b_to_a_attempt = False
-
-    for event in run_events:
-        if (
-            event.get("event") == "INFECTION_ATTEMPT"
-            and event.get("src") == "agent-c"
-            and event.get("dst") == "agent-b"
-        ):
-            seen_c_to_b_attempt = True
-        if (
-            event.get("event") == "INFECTION_ATTEMPT"
-            and event.get("src") == "agent-b"
-            and event.get("dst") == "agent-a"
-        ):
-            seen_b_to_a_attempt = True
-
-        if event.get("event") in {"INFECTION_SUCCESSFUL", "INFECTION_BLOCKED"}:
-            if event.get("dst") == "agent-b" and (event.get("src") != "agent-c" or not seen_c_to_b_attempt):
-                invalid_flows += 1
-            if event.get("dst") == "agent-a" and (event.get("src") != "agent-b" or not seen_b_to_a_attempt):
-                invalid_flows += 1
+    valid_edges = {(src, dst) for src, neighbors in TOPOLOGY.items() for dst in neighbors}
+    invalid_flows = sum(
+        1
+        for event in run_events
+        if event.get("event") in {"INFECTION_ATTEMPT", "INFECTION_SUCCESSFUL", "INFECTION_BLOCKED"}
+        and (str(event.get("src", "")), str(event.get("dst", ""))) not in valid_edges
+    )
 
     return {
-        "c_to_b": {
-            "attempts": c_to_b_attempts,
-            "successes": c_to_b_successes,
-            "success_rate": round(c_to_b_successes / c_to_b_attempts, 3) if c_to_b_attempts else 0.0,
-        },
-        "b_to_a": {
-            "attempts": b_to_a_attempts,
-            "successes": b_to_a_successes,
-            "success_rate": round(b_to_a_successes / b_to_a_attempts, 3) if b_to_a_attempts else 0.0,
-        },
+        "routes": route_stats,
         "invalid_flows_detected": invalid_flows,
         "epoch": context["epoch"],
         "reset_id": context["reset_id"],
@@ -894,16 +1085,235 @@ def _compute_event_rate(events_asc: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _event_time_value(event: Dict[str, Any]) -> float:
+    value = event.get("ts")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        parsed = _parse_timestamp(value)
+        if parsed is None:
+            return 0.0
+        return parsed.timestamp()
+
+
+def _event_mentions_agent(event: Dict[str, Any], agent_id: str) -> bool:
+    metadata = _event_metadata(event)
+    targets = {
+        str(event.get("src", "") or ""),
+        str(event.get("dst", "") or ""),
+        str(metadata.get("agent_id", "") or ""),
+        str(metadata.get("target_agent", "") or ""),
+        str(metadata.get("compromised_agent", "") or ""),
+        str(metadata.get("src_agent", "") or ""),
+        str(metadata.get("dst_agent", "") or ""),
+        str(metadata.get("target", "") or ""),
+    }
+    return agent_id in targets
+
+
+def _alert_type_matches_infection(metadata: Dict[str, Any]) -> bool:
+    alert_type = str(
+        metadata.get("alert_type")
+        or metadata.get("suppressed_alert")
+        or metadata.get("suppression_scope")
+        or ""
+    ).strip().lower()
+    return alert_type in {"", "all", "infection", "infection_state", "infection_state_alert"}
+
+
+def _is_infection_alert_suppression(event: Dict[str, Any], agent_id: str) -> bool:
+    event_name = str(event.get("event", "") or "").upper()
+    metadata = _event_metadata(event)
+    explicit_suppression = (
+        event_name in INFECTION_ALERT_SUPPRESSION_EVENTS
+        or _truthy(metadata.get("suppress_infection_alert"))
+        or _truthy(metadata.get("infection_alert_suppressed"))
+    )
+    if not explicit_suppression or not _alert_type_matches_infection(metadata):
+        return False
+    if _truthy(metadata.get("all_agents")) or str(metadata.get("scope", "")).lower() == "global":
+        return True
+    return _event_mentions_agent(event, agent_id)
+
+
+def _find_infection_alert_suppression(
+    events_asc: List[Dict[str, Any]],
+    agent_id: str,
+    infected_since: float,
+) -> Dict[str, Any] | None:
+    for event in reversed(events_asc):
+        if _event_time_value(event) < infected_since:
+            continue
+        if _is_infection_alert_suppression(event, agent_id):
+            return {
+                "event": event.get("event", ""),
+                "event_id": event.get("event_id", event.get("id", "")),
+                "ts": event.get("ts", ""),
+                "reason": _event_metadata(event).get("reason", "explicit infection alert suppression"),
+            }
+    return None
+
+
+def _build_infection_state_alerts(
+    agents: Dict[str, Dict[str, Any]],
+    events_asc: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    active: List[Dict[str, Any]] = []
+    suppressed: List[Dict[str, Any]] = []
+    for agent_id, agent in sorted(agents.items()):
+        epidemic_state = str(agent.get("epidemic_state") or agent.get("state") or "")
+        if not is_infected_epidemic_state(epidemic_state):
+            continue
+        try:
+            infected_since = float(agent.get("epidemic_last_updated") or 0.0)
+        except (TypeError, ValueError):
+            infected_since = 0.0
+        suppression = _find_infection_alert_suppression(events_asc, agent_id, infected_since)
+        alert = {
+            "id": f"infection-state:{agent_id}",
+            "event": INFECTION_STATE_ALERT_EVENT,
+            "severity": "CRITICAL",
+            "agent_id": agent_id,
+            "src": "siem",
+            "dst": agent_id,
+            "epidemic_state": epidemic_state,
+            "state_after": agent.get("state", ""),
+            "suppressed": suppression is not None,
+            "suppression": suppression,
+            "reason": "agent remains in an infected epidemic state",
+            "recommended_action": "inspect_or_quarantine",
+        }
+        if suppression is None:
+            active.append(alert)
+        else:
+            suppressed.append(alert)
+    return {
+        "count": len(active),
+        "active_count": len(active),
+        "suppressed_count": len(suppressed),
+        "infected_count": len(active) + len(suppressed),
+        "event": INFECTION_STATE_ALERT_EVENT,
+        "items": [*active, *suppressed],
+    }
+
+
+def _resolve_dashboard_epidemic_state(tracker_state: Any, event_agent_state: Any) -> Tuple[str, str]:
+    normalized_tracker_state = epidemic_state_code(str(tracker_state or "S"))
+    event_state = epidemic_state_code(epidemic_state_from_agent_state(str(event_agent_state or "")))
+    if normalized_tracker_state == "S" and is_infected_epidemic_state(event_state):
+        return event_state, "events_table_fallback"
+    return normalized_tracker_state, "epidemic_tracker"
+
+
+def _current_infection_state_alerts() -> Dict[str, Any]:
+    suppression_events: List[Dict[str, Any]] = []
+    try:
+        recent_events_desc, _ = _load_events_from_db(limit=180, order="desc")
+        suppression_events, _ = _load_events_from_db(limit=1000, order="asc")
+        agents = _derive_agents(recent_events_desc)
+    except sqlite3.Error as exc:
+        if _is_sqlite_locked(exc):
+            uvicorn_logger.warning("infection_alert_event_fallback_skipped db_locked err=%s", exc)
+        else:
+            uvicorn_logger.warning("infection_alert_event_fallback_skipped err=%s", exc)
+        agents = {}
+
+    epidemic_state = epidemic_tracker.get_state()
+    for item in epidemic_state.get("agents", []):
+        agent_id = str(item.get("agent_id", "") or "")
+        if not agent_id:
+            continue
+        agent = agents.setdefault(
+            agent_id,
+            {
+                "id": agent_id,
+                "role": AGENT_ROLES.get(agent_id, ""),
+                "state": "healthy",
+                "last_event": "none",
+                "last_seen": "",
+                "last_payload": "",
+                "last_metadata": {},
+            },
+        )
+        resolved_state, state_source = _resolve_dashboard_epidemic_state(
+            item.get("epidemic_state", "S"),
+            agent.get("state", ""),
+        )
+        agent["epidemic_state"] = resolved_state
+        agent["epidemic_state_source"] = state_source
+        agent["epidemic_last_updated"] = item.get("last_updated", "")
+        agent["cognition_tier"] = item.get("cognition_tier", "")
+    return _build_infection_state_alerts(agents, suppression_events)
+
+
+def _degraded_live_payload(after_id: int, exc: Exception) -> Dict[str, Any]:
+    alerts = _current_infection_state_alerts()
+    metrics = epidemic_tracker.get_metrics()
+    return {
+        "events": [],
+        "latest_id": int(after_id or 0),
+        "metrics": {
+            "events_per_sec": 0.0,
+            "infections": alerts["infected_count"],
+            "blocked": 0,
+            "heartbeat": 0,
+            "parse_errors": 0,
+            "last_reset_id": "",
+            "current_epoch": 0,
+            "last_event_ts": "",
+            "infection_state_alerts": alerts["active_count"],
+            "epidemicMetrics": metrics,
+        },
+        "alerts": alerts,
+        "live_degraded": True,
+        "live_degraded_reason": str(exc),
+    }
+
+
 def _dashboard_state_payload() -> Dict[str, Any]:
     recent_events_desc, latest_id = _load_events_from_db(limit=180, order="desc")
     analytics_rows, _ = _load_events_from_db(limit=1200, order="asc")
     agents = _derive_agents(recent_events_desc)
+    epidemic_state = epidemic_tracker.get_state()
+    c2_metrics = c2_engine.get_live_metrics() if c2_engine.enabled else {}
+    epidemic_agents = {
+        item["agent_id"]: item
+        for item in epidemic_state.get("agents", [])
+    }
+    for agent_id, agent in agents.items():
+        if agent_id in epidemic_agents:
+            resolved_state, state_source = _resolve_dashboard_epidemic_state(
+                epidemic_agents[agent_id].get("epidemic_state", "S"),
+                agent.get("state", ""),
+            )
+            agent["epidemic_state"] = resolved_state
+            agent["epidemic_state_source"] = state_source
+            agent["epidemic_last_updated"] = epidemic_agents[agent_id].get("last_updated", "")
+            agent["cognition_tier"] = epidemic_agents[agent_id].get("cognition_tier", "")
+    _enrich_agent_metrics(agents, analytics_rows)
+    if c2_engine.enabled:
+        for agent_id, agent in agents.items():
+            agent.update(c2_engine.get_agent_c2_snapshot(agent_id))
+    alerts = _build_infection_state_alerts(agents, analytics_rows)
     return {
         "status": "running",
         "latest_id": latest_id,
         "topology": TOPOLOGY,
         "events": recent_events_desc,
         "agents": agents,
+        "alerts": alerts,
+        "c2": {
+            "metrics": c2_metrics,
+        },
+        "epidemic": {
+            "state": epidemic_state,
+            "metrics": epidemic_tracker.get_metrics(),
+            "topology": epidemic_tracker.topology_view(),
+        },
         "analytics": {
             "flow_validation": _compute_flow_validation(analytics_rows),
             "run_integrity": _compute_run_integrity(analytics_rows),
@@ -1033,11 +1443,48 @@ async def _wait_for_reset_acks(
     return sorted(acknowledged), sorted(heartbeat_agents), False, True
 
 
+async def _telemetry_integrity_loop() -> None:
+    interval = max(60, int(os.environ.get("TELEMETRY_INTEGRITY_INTERVAL_S", "300") or 300))
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await asyncio.to_thread(siem_indexer.periodic_integrity_check)
+        except Exception as exc:
+            uvicorn_logger.warning("telemetry_integrity_periodic_failed err=%s", exc)
+
+
+async def _log_event_nonblocking(event: Dict[str, Any]) -> None:
+    await asyncio.to_thread(logger.log_event, event)
+
+
+async def _log_event_with_retry(event: Dict[str, Any], *, attempts: int = 5) -> None:
+    last_exc: sqlite3.OperationalError | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            await _log_event_nonblocking(event)
+            return
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_locked(exc):
+                raise
+            last_exc = exc
+            await asyncio.sleep(min(0.75, 0.1 * (attempt + 1)))
+    assert last_exc is not None
+    raise last_exc
+
+
+async def _sync_primary_events_nonblocking(*, limit: int = 2000, force: bool = False) -> Dict[str, Any]:
+    return await asyncio.to_thread(siem_indexer.sync_primary_events, limit=limit, force=force)
+
+
 @app.on_event("startup")
 async def startup_event():
+    global _beacon_forward_queue, _beacon_forward_worker_task
+    epidemic_tracker.reset()
     c2_engine.reset()
     await redis_client.setnx(SIMULATION_EPOCH_KEY, "0")
     start_id = await _get_latest_stream_id()
+    uvicorn_logger.info("epidemic_run_id=%s (override with EPIDEMIC_RUN_ID)", RUN_ID)
+    log_resolved_experiment_config(uvicorn_logger)
     await redis_client.xadd(
         EVENT_STREAM_KEY,
         {
@@ -1046,15 +1493,25 @@ async def startup_event():
             "dst": "orchestrator",
             "event": "RUN_STARTED",
             "state_after": "running",
+            "run_id": RUN_ID,
         },
     )
-    asyncio.create_task(_register_beacon_devices())
+    if C2_BEACON_FORWARD_ENABLED:
+        _beacon_forward_queue = asyncio.Queue(maxsize=_BEACON_QUEUE_MAX)
+        _beacon_forward_worker_task = asyncio.create_task(_beacon_forward_worker())
+        asyncio.create_task(_register_beacon_devices())
+    else:
+        _beacon_forward_queue = None
+        uvicorn_logger.info(
+            "beacon_forward_disabled env=C2_BEACON_FORWARD_ENABLED (external beacon HTTP forwarding is off)"
+        )
     asyncio.create_task(consume_events(start_id))
+    asyncio.create_task(_telemetry_integrity_loop())
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    global _beacon_client
+    global _beacon_client, _beacon_forward_worker_task
     await redis_client.xadd(
         EVENT_STREAM_KEY,
         {
@@ -1065,6 +1522,13 @@ async def shutdown_event():
             "state_after": "stopped",
         },
     )
+    if _beacon_forward_worker_task is not None:
+        _beacon_forward_worker_task.cancel()
+        try:
+            await _beacon_forward_worker_task
+        except asyncio.CancelledError:
+            pass
+        _beacon_forward_worker_task = None
     if _beacon_client is not None:
         await _beacon_client.aclose()
         _beacon_client = None
@@ -1080,22 +1544,45 @@ async def consume_events(start_id: str):
                 if c2_engine.enabled:
                     await c2_engine.tick()
                 continue
+            batch_last_event_id: str | None = None
             for _stream_name, messages in result:
                 for message_id, message_data in messages:
                     if "ts" not in message_data:
                         continue
-                    logger.log_event(message_data)
-                    if _should_forward_to_beacon(message_data):
-                        asyncio.create_task(_forward_to_beacon(dict(message_data)))
-                    # C2: trigger post-compromise on successful infection
-                    event_name = str(message_data.get("event", "")).upper()
-                    if event_name == "INFECTION_SUCCESSFUL" and c2_engine.enabled:
-                        asyncio.create_task(c2_engine.on_infection_successful(dict(message_data)))
+                    parsed = parse_stream_message(dict(message_data))
+                    enriched = enrich_forensic_event(
+                        parsed, run_id=RUN_ID, stream_message_id=message_id
+                    )
+                    await strain_engine.observe_enriched(enriched)
+                    trigger_token = TRIGGER_EVENT_ID.set(enriched["event_id"])
+                    try:
+                        await _log_event_with_retry(enriched)
+                        epidemic_tracker.observe_event(dict(enriched))
+                        if C2_BEACON_FORWARD_ENABLED and _should_forward_to_beacon(enriched):
+                            _enqueue_beacon_forward(dict(enriched))
+                        # Always record defense friction tape (observe_event no-ops C2 when disabled).
+                        await c2_engine.observe_event(dict(enriched))
+                        batch_last_event_id = enriched["event_id"]
+                    finally:
+                        TRIGGER_EVENT_ID.reset(trigger_token)
                     last_id = message_id
-                siem_indexer.sync_primary_events()
-            # Tick C2 engine after processing batch
+                    await asyncio.sleep(0)
+                try:
+                    await _sync_primary_events_nonblocking(limit=200)
+                except sqlite3.OperationalError as exc:
+                    if not _is_sqlite_locked(exc):
+                        raise
+                    uvicorn_logger.warning("siem_sync_deferred db_locked err=%s", exc)
+            # Tick C2 engine after processing batch (chain to last ingested event)
+            tick_token = None
             if c2_engine.enabled:
-                await c2_engine.tick()
+                if batch_last_event_id:
+                    tick_token = TRIGGER_EVENT_ID.set(batch_last_event_id)
+                try:
+                    await c2_engine.tick()
+                finally:
+                    if tick_token is not None:
+                        TRIGGER_EVENT_ID.reset(tick_token)
         except Exception as exc:
             print(f"Error consuming events: {exc}")
             await asyncio.sleep(1)
@@ -1118,9 +1605,24 @@ async def favicon() -> Response:
 
 
 @app.get("/events")
-async def get_events(after_id: int = 0, limit: int = 100, order: str = "desc"):
+async def get_events(
+    after_id: int = 0,
+    limit: int = 100,
+    order: str = "desc",
+    compact: int = 0,
+):
+    """
+    compact=1 truncates each event's payload string for callers that only need ids/metadata
+    (reduces JSON size and OOM risk during high-volume soaks).
+    """
     try:
         events, latest_id = _load_events_from_db(after_id=after_id, limit=limit, order=order)
+        if int(compact or 0) == 1:
+            cap = 384
+            for event in events:
+                pl = event.get("payload")
+                if isinstance(pl, str) and len(pl) > cap:
+                    event["payload"] = pl[:cap] + "…"
         return {"events": events, "latest_id": latest_id}
     except Exception as exc:
         return {"events": [], "error": str(exc)}
@@ -1129,7 +1631,7 @@ async def get_events(after_id: int = 0, limit: int = 100, order: str = "desc"):
 @app.get("/dashboard/state")
 async def get_dashboard_state():
     try:
-        return _dashboard_state_payload()
+        return await asyncio.to_thread(_dashboard_state_payload)
     except Exception as exc:
         return {"status": "error", "error": str(exc), "events": [], "latest_id": 0}
 
@@ -1178,9 +1680,24 @@ async def api_search(
 @app.get("/api/live")
 async def api_live(after_id: int = 0, limit: int = 100, q: str = ""):
     try:
-        return siem_indexer.live(after_id=after_id, limit=limit, query=q)
+        payload = await asyncio.to_thread(siem_indexer.live, after_id=after_id, limit=limit, query=q)
+        try:
+            alerts = await asyncio.to_thread(_current_infection_state_alerts)
+            payload["alerts"] = alerts
+            metrics = payload.setdefault("metrics", {})
+            metrics["infection_state_alerts"] = alerts["active_count"]
+            metrics["infection_state_suppressed"] = alerts["suppressed_count"]
+            metrics["infection_state_infected"] = alerts["infected_count"]
+        except Exception as alert_exc:
+            uvicorn_logger.warning("live_infection_alerts_unavailable err=%s", alert_exc)
+        return payload
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except sqlite3.OperationalError as exc:
+        if _is_sqlite_locked(exc):
+            uvicorn_logger.warning("live_siem_degraded db_locked err=%s", exc)
+            return _degraded_live_payload(after_id, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -1583,9 +2100,66 @@ async def api_stats_presets(
 @app.get("/api/health")
 async def api_health():
     try:
-        return siem_indexer.health()
+        payload = siem_indexer.health_snapshot()
+        payload["event_logger"] = {
+            **logger.health_snapshot(),
+            "integrity_check_deferred": True,
+        }
+        payload["deep_check_endpoint"] = "/api/telemetry/verify-index"
+        return payload
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/telemetry/verify-index")
+async def api_telemetry_verify_index():
+    return {
+        "siem_index": siem_indexer.verify_index_integrity(),
+        "event_logger": {**logger.verify_integrity(), **logger.health_snapshot()},
+    }
+
+
+@app.get("/api/telemetry/forensic-summary")
+async def api_telemetry_forensic_summary(
+    path: str = "",
+    output: str = "json",
+):
+    """Decision-grade summary from a run directory (all_events.jsonl) or a single .jsonl log (under import roots)."""
+    raw = _normalized_text(path)
+    if not raw:
+        raise HTTPException(status_code=400, detail="path query parameter is required")
+    resolved = _validated_import_path(raw)
+    if resolved.is_file():
+        if resolved.suffix.lower() != ".jsonl":
+            raise HTTPException(status_code=400, detail="path must be a .jsonl file or a directory")
+        events = list(iter_jsonl_events(resolved))
+        doc = build_forensic_summary(
+            events,
+            window_label=resolved.stem,
+            source_path=str(resolved),
+        )
+    else:
+        doc = build_forensic_summary_from_run_dir(resolved)
+    if str(output or "").lower() in ("md", "markdown"):
+        return Response(
+            content=forensic_summary_to_markdown(doc),
+            media_type="text/markdown; charset=utf-8",
+        )
+    return doc
+
+
+@app.post("/api/telemetry/rebuild-index")
+async def api_telemetry_rebuild_index(payload: RebuildIndexPayload):
+    raw = _normalized_text(payload.jsonl_path)
+    path: str | None = None
+    if raw:
+        path = str(_validated_import_path(raw))
+    try:
+        return siem_indexer.rebuild_index_from_jsonl(jsonl_path=path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1598,6 +2172,8 @@ async def api_c2_sessions(
     campaign_id: str = "",
     agent_id: str = "",
     status: str = "",
+    lifecycle_state: str = "",
+    c2_session_id: str = "",
     limit: int = 100,
     offset: int = 0,
 ):
@@ -1605,6 +2181,8 @@ async def api_c2_sessions(
         campaign_id=campaign_id,
         agent_id=agent_id,
         status=status,
+        lifecycle_state=lifecycle_state,
+        c2_session_id=c2_session_id,
         limit=min(limit, 500),
         offset=offset,
     )
@@ -1791,6 +2369,32 @@ async def api_c2_metrics():
     return c2_engine.get_live_metrics()
 
 
+@app.get("/api/epidemic/state")
+async def api_epidemic_state():
+    return epidemic_tracker.get_state()
+
+
+@app.get("/api/epidemic/metrics")
+async def api_epidemic_metrics():
+    return epidemic_tracker.get_metrics()
+
+
+@app.get("/api/epidemic/transitions")
+async def api_epidemic_transitions(limit: int = 100):
+    return epidemic_tracker.get_transitions(limit=min(max(limit, 1), 500))
+
+
+@app.get("/api/epidemic/topology")
+async def api_epidemic_topology():
+    return epidemic_tracker.topology_view()
+
+
+@app.get("/api/strain/health")
+async def api_strain_health():
+    """Strain store status: SQLite vs degraded JSONL fallback (Patch 2)."""
+    return strain_engine.health()
+
+
 @app.get("/api/runs")
 async def api_runs():
     """List available soak runs from the logs directory, newest first."""
@@ -1854,7 +2458,7 @@ async def api_import(payload: ImportPayload):
                 count=payload.count,
             )
         if source == "events_table":
-            return siem_indexer.sync_primary_events(limit=max(1, min(payload.count, 10000)))
+            return await _sync_primary_events_nonblocking(limit=max(1, min(payload.count, 10000)))
         raise HTTPException(status_code=400, detail="Unsupported source")
     except HTTPException:
         raise
@@ -1895,13 +2499,19 @@ async def get_status():
 
 @app.post("/inject/{agent_id}")
 async def inject_worm(agent_id: str, payload: InjectPayload):
-    from scenarios.worm_injection import get_attack_strength, get_worm_payload
+    from scenarios.worm_injection import get_attack_strength, get_worm_for_injection
 
     agent_id = _validated_agent_id(agent_id)
-    worm = get_worm_payload(payload.worm_level)
+    worm = get_worm_for_injection(payload.worm_level, agent_id)
     injection_id = os.urandom(8).hex()
-    epoch = await _get_current_epoch()
-    reset_id = await _get_current_reset_id()
+    try:
+        epoch = await _get_current_epoch()
+        reset_id = await _get_current_reset_id()
+    except RedisError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Message bus (Redis) unavailable — start the stack: docker compose up -d. ({exc})",
+        ) from exc
     attack_strength = get_attack_strength(payload.worm_level)
     metadata = {
         "level": payload.worm_level,
@@ -1923,22 +2533,28 @@ async def inject_worm(agent_id: str, payload: InjectPayload):
         "payload": worm["content"],
         "metadata": metadata,
     }
-    await redis_client.publish(_agent_channel_name(agent_id), json.dumps(msg))
+    try:
+        await redis_client.publish(_agent_channel_name(agent_id), json.dumps(msg))
 
-    await redis_client.xadd(
-        EVENT_STREAM_KEY,
-        {
-            "ts": str(time.time()),
-            "src": "orchestrator",
-            "dst": agent_id,
-            "event": "WRM-INJECT",
-            "attack_type": worm["type"],
-            "payload": worm["content"],
-            "metadata": json.dumps(metadata),
-            "hop_count": "0",
-            "injection_id": injection_id,
-        },
-    )
+        await redis_client.xadd(
+            EVENT_STREAM_KEY,
+            {
+                "ts": str(time.time()),
+                "src": "orchestrator",
+                "dst": agent_id,
+                "event": "WRM-INJECT",
+                "attack_type": worm["type"],
+                "payload": worm["content"],
+                "metadata": json.dumps(metadata),
+                "hop_count": "0",
+                "injection_id": injection_id,
+            },
+        )
+    except RedisError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Message bus (Redis) unavailable — start the stack: docker compose up -d. ({exc})",
+        ) from exc
 
     return {
         "status": "injected",

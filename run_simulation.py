@@ -1,8 +1,8 @@
 """
 Epidemic Lab — Long-running simulation driver.
 
-Injects escalating worm payloads into agent-c (Courier) at intervals,
-monitors the simulation until agent-a (Guardian) is infected or timeout.
+Injects escalating worm payloads into a courier ingress node at intervals,
+monitors the simulation until the guardian is infected or timeout.
 Exports a full event log for post-simulation analysis.
 
 Usage: python run_simulation.py
@@ -16,6 +16,8 @@ import urllib.request
 import urllib.error
 
 BASE_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:8000")
+INGRESS_AGENT = os.environ.get("SIMULATION_INGRESS_AGENT", "courier-1")
+GUARDIAN_AGENT = os.environ.get("SIMULATION_GUARDIAN_AGENT", "guardian")
 
 # Attack sequence: escalating difficulty with repeats
 ATTACK_PLAN = [
@@ -56,8 +58,8 @@ ATTACK_PLAN = [
 
 # How often to check agent states (seconds)
 POLL_INTERVAL_S = 30
-# Max total simulation time (4 hours)
-MAX_RUNTIME_S = 4 * 3600
+# Max total simulation time — overridable via SIMULATION_MAX_RUNTIME_S (default 4h)
+MAX_RUNTIME_S = int(os.environ.get("SIMULATION_MAX_RUNTIME_S", str(4 * 3600)))
 
 
 def api_call(method: str, path: str, data: dict = None) -> dict:
@@ -84,8 +86,8 @@ def api_call(method: str, path: str, data: dict = None) -> dict:
 
 
 def inject_worm(level: str) -> dict:
-    """Inject a worm payload into agent-c."""
-    return api_call("POST", "/inject/agent-c", data={"worm_level": level})
+    """Inject a worm payload into the configured ingress courier."""
+    return api_call("POST", f"/inject/{INGRESS_AGENT}", data={"worm_level": level})
 
 
 def get_dashboard() -> dict:
@@ -98,18 +100,16 @@ def get_events(after_id: int = 0, limit: int = 500) -> dict:
     return api_call("GET", f"/events?after_id={after_id}&limit={limit}&order=asc")
 
 
-def check_agent_a_infected(dashboard: dict) -> bool:
-    """Check if agent-a (Guardian) has been infected."""
+def check_guardian_infected(dashboard: dict) -> bool:
+    """Check if the guardian terminal node has been infected."""
     agents = dashboard.get("agents", {})
-    agent_a = agents.get("agent-a", {})
-    last_event = agent_a.get("last_event", "")
-    # Check if agent-a's last event indicates infection
+    guardian = agents.get(GUARDIAN_AGENT, {})
+    last_event = guardian.get("last_event", "")
     if "INFECTION_SUCCESSFUL" in str(last_event):
         return True
-    # Also check events for agent-a infection
     events = dashboard.get("events", [])
     for event in events:
-        if event.get("event") == "INFECTION_SUCCESSFUL" and event.get("dst") == "agent-a":
+        if event.get("event") == "INFECTION_SUCCESSFUL" and event.get("dst") == GUARDIAN_AGENT:
             return True
     return False
 
@@ -137,13 +137,13 @@ def log_status(msg: str):
 def main():
     log_status("=" * 70)
     log_status("EPIDEMIC LAB -- FULL SIMULATION RUN")
-    log_status("Goal: Infect agent-a (Guardian) through agent chain c -> b -> a")
+    log_status(f"Goal: Infect {GUARDIAN_AGENT} (ingress={INGRESS_AGENT})")
     log_status(f"Max runtime: {MAX_RUNTIME_S // 3600}h, Attacks planned: {len(ATTACK_PLAN)}")
     log_status("=" * 70)
 
     start_time = time.time()
     injection_count = 0
-    agent_a_infected = False
+    guardian_infected = False
     attack_index = 0
     last_event_id = 0
     injection_log = []
@@ -197,11 +197,11 @@ def main():
                 # Check agent states
                 try:
                     dashboard = get_dashboard()
-                    if check_agent_a_infected(dashboard):
-                        agent_a_infected = True
+                    if check_guardian_infected(dashboard):
+                        guardian_infected = True
                         log_status("")
                         log_status("🔴" * 30)
-                        log_status("AGENT-A (GUARDIAN) HAS BEEN INFECTED!")
+                        log_status(f"{GUARDIAN_AGENT.upper()} (GUARDIAN) HAS BEEN INFECTED!")
                         log_status(f"Time to infection: {elapsed_str}")
                         log_status(f"Injections used: {injection_count}")
                         log_status("🔴" * 30)
@@ -215,7 +215,7 @@ def main():
                 except Exception as e:
                     log_status(f"  [poll] Error: {e}")
 
-            if agent_a_infected:
+            if guardian_infected:
                 break
 
         else:
@@ -225,11 +225,11 @@ def main():
 
             try:
                 dashboard = get_dashboard()
-                if check_agent_a_infected(dashboard):
-                    agent_a_infected = True
+                if check_guardian_infected(dashboard):
+                    guardian_infected = True
                     log_status("")
                     log_status("🔴" * 30)
-                    log_status("AGENT-A (GUARDIAN) HAS BEEN INFECTED!")
+                    log_status(f"{GUARDIAN_AGENT.upper()} (GUARDIAN) HAS BEEN INFECTED!")
                     log_status(f"Time to infection: {elapsed_str}")
                     log_status(f"Injections used: {injection_count}")
                     log_status("🔴" * 30)
@@ -252,23 +252,35 @@ def main():
     log_status("SIMULATION COMPLETE")
     log_status(f"Duration: {total_str}")
     log_status(f"Injections: {injection_count}")
-    log_status(f"Agent-A infected: {agent_a_infected}")
+    log_status(f"Guardian infected: {guardian_infected}")
     log_status("=" * 70)
 
     # ─── Export final data ───
     log_status("Exporting simulation data...")
 
-    # Get all events
+    # Get all events.
+    # IMPORTANT: previously this loop set after_id = batch["latest_id"] which
+    # is the *global* MAX(id) of the events table — the second iteration then
+    # queried `id > MAX(id)` and exited immediately, so only the tail batch
+    # was ever captured (in the 1h sim that meant 515 events out of 28,715).
+    # The fix walks the cursor forward using the last id actually returned by
+    # the server. The /events endpoint accepts (after_id=0, order=asc) as a
+    # full-forward-scan from id=1.
     all_events = []
     after_id = 0
+    page_size = 500
     while True:
-        batch = get_events(after_id=after_id, limit=500)
+        batch = get_events(after_id=after_id, limit=page_size)
         events = batch.get("events", [])
         if not events:
             break
         all_events.extend(events)
-        after_id = batch.get("latest_id", 0)
-        if len(events) < 500:
+        # Advance cursor to the last id we actually saw (not the global max).
+        try:
+            after_id = int(events[-1].get("id", 0))
+        except (TypeError, ValueError):
+            break
+        if len(events) < page_size:
             break
 
     # Get final dashboard
@@ -282,7 +294,7 @@ def main():
             "duration_s": total_time,
             "duration_human": total_str,
             "total_injections": injection_count,
-            "agent_a_infected": agent_a_infected,
+            "guardian_infected": guardian_infected,
             "total_events": len(all_events),
         },
         "injection_log": injection_log,

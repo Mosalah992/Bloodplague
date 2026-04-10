@@ -877,8 +877,10 @@ def build_payload_families(events: Sequence[Dict[str, Any]], *, truncated: bool 
         if not payload_hash:
             continue
         metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        pf_cluster = str(metadata.get("payload_family_id") or "").strip()
         family_key = "|".join(
             [
+                pf_cluster or "(no_pfam)",
                 str(event.get("semantic_family") or metadata.get("semantic_family") or "unclassified"),
                 str(lineage["roots"].get(payload_hash, payload_hash) or ""),
                 str(event.get("payload_wrapper_type") or metadata.get("payload_wrapper_type") or "plain"),
@@ -895,9 +897,12 @@ def build_payload_families(events: Sequence[Dict[str, Any]], *, truncated: bool 
         blocks = sum(1 for item in attempts if item.get("outcome") == "blocked")
         payload_hashes = stable_unique(item.get("payload_hash") for item in items)
         family_name = most_common_nonempty((item.get("semantic_family") for item in items), default="unclassified")
+        pf_ids = stable_unique(str((item.get("metadata") or {}).get("payload_family_id") or "") for item in items)
+        pf_ids = [p for p in pf_ids if p]
         families.append(
             {
                 "family_id": family_key,
+                "payload_family_ids": pf_ids[:5],
                 "semantic_family": family_name,
                 "root_payload_hash": first_nonempty((lineage["roots"].get(item, "") for item in payload_hashes)) or first_nonempty(payload_hashes),
                 "wrapper_type": most_common_nonempty((item.get("payload_wrapper_type") for item in items), default="plain"),

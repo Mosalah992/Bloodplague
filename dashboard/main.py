@@ -7,6 +7,7 @@ from textual.containers import Horizontal
 from textual.widgets import Button, Footer, Header, Static
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
+INGRESS_AGENT = os.environ.get("DASHBOARD_INGRESS_AGENT", "courier-1")
 
 
 class SimulationControl(App):
@@ -35,7 +36,7 @@ class SimulationControl(App):
         with Horizontal(id="controls"):
             yield Button("Inject Easy", id="inject-easy")
             yield Button("Inject Medium", id="inject-medium")
-            yield Button("Quarantine C", id="quarantine")
+            yield Button("Quarantine ingress", id="quarantine")
             yield Button("Reset", id="reset")
             yield Static("API: pending", id="api-status")
         yield Static(id="health-panel", classes="panel")
@@ -99,11 +100,11 @@ class SimulationControl(App):
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "inject-easy":
-            await self._post_control("/inject/agent-c", {"worm_level": "easy"})
+            await self._post_control(f"/inject/{INGRESS_AGENT}", {"worm_level": "easy"})
         elif event.button.id == "inject-medium":
-            await self._post_control("/inject/agent-c", {"worm_level": "medium"})
+            await self._post_control(f"/inject/{INGRESS_AGENT}", {"worm_level": "medium"})
         elif event.button.id == "quarantine":
-            await self._post_control("/quarantine/agent-c")
+            await self._post_control(f"/quarantine/{INGRESS_AGENT}")
         elif event.button.id == "reset":
             await self._post_control("/reset")
 

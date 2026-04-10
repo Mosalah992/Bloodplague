@@ -4,6 +4,11 @@ import json
 import threading
 from datetime import datetime, timezone
 
+try:
+    from telemetry_integrity import verify_sqlite_integrity
+except ImportError:  # pragma: no cover
+    from orchestrator.telemetry_integrity import verify_sqlite_integrity
+
 
 class EventLogger:
     """
@@ -22,13 +27,66 @@ class EventLogger:
         self.jsonl_path = jsonl_path
         self._conn: sqlite3.Connection | None = None
         self._write_lock = threading.Lock()
+        self._degraded_jsonl_only: bool = False
+        self._degraded_reason: str = ""
         self._init_db()
+        self._bootstrap_integrity_deferred = not self._env_truthy("TELEMETRY_BOOTSTRAP_INTEGRITY", "1")
+        if not self._bootstrap_integrity_deferred:
+            self._bootstrap_integrity()
+
+    @staticmethod
+    def _env_truthy(name: str, default: str = "0") -> bool:
+        return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+    def _bootstrap_integrity(self) -> None:
+        r = verify_sqlite_integrity(self.db_path)
+        if r.get("skipped"):
+            return
+        if not r.get("ok"):
+            self._degraded_jsonl_only = True
+            self._degraded_reason = str(r.get("detail") or "integrity_failed")[:500]
+            self.close()
+            self._emit_logger_health_jsonl()
+
+    def _emit_logger_health_jsonl(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self.jsonl_path), exist_ok=True)
+            line = {
+                "event": "TELEMETRY_LOGGER_DEGRADED",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "src": "orchestrator",
+                "dst": "orchestrator",
+                "metadata": {
+                    "severity": "critical",
+                    "component": "event_logger",
+                    "reason": self._degraded_reason,
+                    "db_path": self.db_path,
+                },
+            }
+            with open(self.jsonl_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(line, ensure_ascii=False) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError:
+            pass
+
+    def verify_integrity(self) -> dict:
+        return verify_sqlite_integrity(self.db_path)
+
+    def health_snapshot(self) -> dict:
+        return {
+            "jsonl_only": self._degraded_jsonl_only,
+            "degraded_reason": self._degraded_reason,
+            "db_path": self.db_path,
+            "jsonl_path": self.jsonl_path,
+            "bootstrap_integrity_deferred": self._bootstrap_integrity_deferred,
+        }
 
     def _get_conn(self) -> sqlite3.Connection:
         """Get or create a persistent SQLite connection with env-selectable journal mode."""
         if self._conn is None:
             os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-            self._conn = sqlite3.connect(self.db_path, timeout=10.0)
+            self._conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
             # Docker Desktop bind mounts can expose stale or unreadable WAL state
             # across independent readers, so default to DELETE unless explicitly
             # overridden for a known-good environment.
@@ -123,6 +181,12 @@ class EventLogger:
         os.makedirs(os.path.dirname(jsonl_path), exist_ok=True)
 
         with self._write_lock:
+            if self._degraded_jsonl_only:
+                with open(jsonl_path, "a", encoding="utf-8") as handle:
+                    handle.write(json_line)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                return
             jsonl_size_before = os.path.getsize(jsonl_path) if os.path.exists(jsonl_path) else 0
             jsonl_written = False
             conn = self._get_conn()

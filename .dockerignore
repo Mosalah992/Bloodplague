@@ -1,9 +1,49 @@
+# --- VCS & IDE ---
 .git
+.gitignore
+.cursor
+.claude
 .pytest_cache
+.vscode
+.idea
+
+# --- Python bytecode ---
 **/__pycache__/
 **/*.pyc
+**/*.pyo
+**/*.pyd
+
+# --- Secrets (NEVER ship build-time) ---
+.env
+.env.*
+!.env.example
+
+# --- Frontend caches (built via multi-stage) ---
 frontend/node_modules
 frontend/dist
+
+# --- Runtime artifacts / local state ---
 logs
 llama_pull.log
+tmp_beacon_bundle
+siem_index_debug.db
+siem_index_pretest.db
+*.db
+*.sqlite
+*.sqlite3
 
+# --- PyInstaller / local packaging ---
+build
+dist
+epidemic_cli
+epidemic_cli.spec
+epidemic_cli_launcher.py
+
+# --- Docs & meta (not needed in images) ---
+*.md
+!agents/**/*.md
+docs
+claude-skills
+
+# --- Tests (not executed inside prod images) ---
+tests

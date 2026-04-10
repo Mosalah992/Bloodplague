@@ -74,7 +74,7 @@ class Phase3IntelligenceTests(unittest.TestCase):
             rows = [
                 (
                     "2026-04-01T00:00:00+00:00",
-                    "agent-c",
+                    "courier-1",
                     "agent-b",
                     "ATTACKER_DECISION",
                     "PI-ROLEPLAY",
@@ -102,7 +102,7 @@ class Phase3IntelligenceTests(unittest.TestCase):
                 ),
                 (
                     "2026-04-01T00:00:01+00:00",
-                    "agent-c",
+                    "courier-1",
                     "agent-b",
                     "ATTACK_EXECUTED",
                     "PI-ROLEPLAY",
@@ -132,7 +132,7 @@ class Phase3IntelligenceTests(unittest.TestCase):
                 (
                     "2026-04-01T00:00:02+00:00",
                     "agent-b",
-                    "agent-c",
+                    "courier-1",
                     "ATTACK_RESULT_EVALUATED",
                     "PI-ROLEPLAY",
                     root_payload,
@@ -160,8 +160,8 @@ class Phase3IntelligenceTests(unittest.TestCase):
                 ),
                 (
                     "2026-04-01T00:00:03+00:00",
-                    "agent-c",
-                    "agent-c",
+                    "courier-1",
+                    "courier-1",
                     "CAMPAIGN_ADAPTED",
                     "",
                     "",
@@ -177,7 +177,7 @@ class Phase3IntelligenceTests(unittest.TestCase):
                 ),
                 (
                     "2026-04-01T00:00:04+00:00",
-                    "agent-c",
+                    "courier-1",
                     "agent-b",
                     "ATTACKER_DECISION",
                     "PI-JAILBREAK",
@@ -205,7 +205,7 @@ class Phase3IntelligenceTests(unittest.TestCase):
                 ),
                 (
                     "2026-04-01T00:00:05+00:00",
-                    "agent-c",
+                    "courier-1",
                     "agent-b",
                     "ATTACK_EXECUTED",
                     "PI-JAILBREAK",
@@ -234,7 +234,7 @@ class Phase3IntelligenceTests(unittest.TestCase):
                 ),
                 (
                     "2026-04-01T00:00:06+00:00",
-                    "agent-c",
+                    "courier-1",
                     "agent-b",
                     "INFECTION_SUCCESSFUL",
                     "PI-JAILBREAK",
@@ -256,7 +256,7 @@ class Phase3IntelligenceTests(unittest.TestCase):
                 (
                     "2026-04-01T00:00:07+00:00",
                     "agent-b",
-                    "agent-c",
+                    "courier-1",
                     "ATTACK_RESULT_EVALUATED",
                     "PI-JAILBREAK",
                     branch_payload,
@@ -282,7 +282,7 @@ class Phase3IntelligenceTests(unittest.TestCase):
                 (
                     "2026-04-01T00:00:08+00:00",
                     "agent-b",
-                    "agent-a",
+                    "guardian",
                     "ATTACK_EXECUTED",
                     "PI-JAILBREAK",
                     deep_payload,
@@ -309,7 +309,7 @@ class Phase3IntelligenceTests(unittest.TestCase):
                 (
                     "2026-04-01T00:00:09+00:00",
                     "agent-b",
-                    "agent-a",
+                    "guardian",
                     "INFECTION_BLOCKED",
                     "PI-JAILBREAK",
                     deep_payload,
@@ -329,7 +329,7 @@ class Phase3IntelligenceTests(unittest.TestCase):
                 ),
                 (
                     "2026-04-01T00:00:10+00:00",
-                    "agent-c",
+                    "courier-1",
                     "agent-b",
                     "ATTACK_EXECUTED",
                     "PI-ROLEPLAY",
@@ -356,7 +356,7 @@ class Phase3IntelligenceTests(unittest.TestCase):
                 ),
                 (
                     "2026-04-01T00:00:11+00:00",
-                    "agent-c",
+                    "courier-1",
                     "agent-b",
                     "INFECTION_BLOCKED",
                     "PI-ROLEPLAY",
@@ -377,7 +377,7 @@ class Phase3IntelligenceTests(unittest.TestCase):
                 ),
                 (
                     "2026-04-01T00:00:12+00:00",
-                    "agent-c",
+                    "courier-1",
                     "agent-b",
                     "ATTACK_EXECUTED",
                     "PI-DIRECT",
@@ -460,7 +460,7 @@ class Phase3IntelligenceTests(unittest.TestCase):
         campaign = indexer.campaign("cmp-1")
         self.assertEqual(campaign["overview"]["campaign_id"], "cmp-1")
         self.assertGreaterEqual(campaign["overview"]["highest_hop_reached"], 2)
-        self.assertEqual(campaign["overview"]["deepest_target_reached"], "agent-a")
+        self.assertEqual(campaign["overview"]["deepest_target_reached"], "guardian")
         self.assertEqual(campaign["overview"]["deepest_target_depth"], 3)
         self.assertTrue(campaign["findings"])
         self.assertTrue(campaign["reasoning_timeline"])

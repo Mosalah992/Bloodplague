@@ -165,6 +165,16 @@ def summarize_minute(
     )
     top_target = Counter(str(event.get("dst") or "") for event in events if event.get("dst"))
     defense_results = Counter(str(metadata(event).get("defense_result") or "") for event in events if metadata(event).get("defense_result"))
+    payload_family_ids = Counter(
+        str(metadata(event).get("payload_family_id") or "")
+        for event in events
+        if metadata(event).get("payload_family_id")
+    )
+    payload_novelty_mix = Counter(
+        str(metadata(event).get("payload_novelty_class") or "")
+        for event in events
+        if metadata(event).get("payload_novelty_class")
+    )
     cumulative_counts = Counter(str(event.get("event", "")) for event in cumulative_events)
     blocked = cumulative_counts["INFECTION_BLOCKED"]
     successful = cumulative_counts["INFECTION_SUCCESSFUL"]
@@ -192,6 +202,8 @@ def summarize_minute(
         "cumulative_blocks": blocked,
         "cumulative_block_ratio": round(blocked / max(blocked + successful, 1), 4),
         "highlights": highlights,
+        "top_payload_families": [{"family_id": fid, "count": c} for fid, c in payload_family_ids.most_common(8)],
+        "payload_novelty_mix": dict(payload_novelty_mix),
         "sample_event_ids": [str(event.get("event_id") or event.get("id") or "") for event in events[:5]],
     }
 
@@ -394,7 +406,11 @@ def main() -> None:
     compose_env["HEARTBEAT_INTERVAL_S"] = str(ACCELERATED_HEARTBEAT_SECONDS)
 
     run_command(["docker", "compose", "down", "--remove-orphans"], env=compose_env, output_path=ARTIFACT_DIR / "compose_down.txt")
-    run_command(["docker", "compose", "build", "orchestrator", "agent-a", "agent-b", "agent-c"], env=compose_env, output_path=ARTIFACT_DIR / "compose_build.txt")
+    run_command(
+        ["docker", "compose", "build", "orchestrator", "courier-1", "courier-2", "analyst-1", "analyst-2", "guardian"],
+        env=compose_env,
+        output_path=ARTIFACT_DIR / "compose_build.txt",
+    )
     run_command(["docker", "compose", "up", "-d"], env=compose_env, output_path=ARTIFACT_DIR / "compose_up.txt")
 
     try:
@@ -414,7 +430,7 @@ def main() -> None:
                 injection: Dict[str, Any] | None = None
                 if minute_index == 1 or (minute_index - 1) % INJECT_EVERY_MINUTES == 0:
                     level = LEVEL_PATTERN[((minute_index - 1) // INJECT_EVERY_MINUTES) % len(LEVEL_PATTERN)]
-                    injection = api_json("POST", "/inject/agent-c", {"worm_level": level})
+                    injection = api_json("POST", "/inject/courier-1", {"worm_level": level})
                     injection["worm_level"] = level
                     injection["logical_minute"] = minute_index
                     injections.append(injection)
