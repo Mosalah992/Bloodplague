@@ -63,12 +63,25 @@ painful or impossible.
 - [ ] **Recommended safety move:** physically unplug the Hikvision (Windows)
       and Crucial (data) SSDs during install. Only the Samsung is connected.
       This makes it impossible to overwrite Windows by accident.
-- [ ] In the installer, choose: install alongside / something-else partitioning,
-      target the Samsung SSD only
+- [ ] In the installer, choose **manual partitioning** (the "something else"
+      option) targeting the Samsung SSD only. Create exactly three partitions:
+      - **`/boot/efi`** — 512 MB, FAT32, mount point `/boot/efi`, flags `boot`
+        and `esp`. **This is a dedicated EFI partition for Kubuntu, separate
+        from the Windows EFI partition on the Hikvision SSD.** Sharing EFI
+        partitions across operating systems is a known footgun: Windows
+        Updates have a documented history of removing non-Windows boot
+        entries from a shared EFI partition. A dedicated EFI on the same
+        physical disk as the Linux install avoids this entirely.
+      - **`swap`** — 8 GB Linux swap (skip entirely if you do not care about
+        hibernation; the modern alternative is a swap file managed by the OS).
+      - **`/`** — rest of the Samsung, ext4, mount point `/`.
 - [ ] Set up your user account (this user will need to be in the `docker`
       group later — the username is referenced from then on)
 - [ ] Complete install, reboot, plug the other SSDs back in
 - [ ] First boot — confirm KDE Plasma loads, network works, you can log in
+- [ ] In BIOS, set boot order so the Samsung SSD's Kubuntu entry is default,
+      with Windows on Hikvision still selectable from the boot menu (F8/F12
+      depending on your BIOS — common on MSI is F11)
 
 ---
 
