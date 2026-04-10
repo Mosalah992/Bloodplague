@@ -2,7 +2,7 @@ import { formatDate, formatTime, toneClasses } from "../data";
 
 export function Header({ activeTab, setActiveTab, alertCount, clock }) {
   return (
-    <header className="sticky top-0 z-40 border-b border-slate-800 bg-[#080c11]/95 backdrop-blur">
+    <header className="sticky top-0 z-40 border-b border-white/10 glass">
       <div className="flex flex-wrap items-center justify-between gap-4 px-3 py-4">
         <div className="flex min-w-[260px] items-center gap-4">
           <div className="flex items-center gap-1 font-pixel text-[13px] uppercase tracking-[0.2em] text-terminal-cyan">
@@ -12,9 +12,9 @@ export function Header({ activeTab, setActiveTab, alertCount, clock }) {
           <div className="font-mono text-[11px] text-slate-500">v2.4.1-alpha</div>
         </div>
         <nav className="flex flex-wrap items-center gap-1 font-pixel text-[7px] uppercase text-slate-500">
-          <TabButton label="SIMULATION" active={activeTab === "simulation"} onClick={() => setActiveTab("simulation")} />
-          <TabButton label="SEARCH" active={activeTab === "search"} onClick={() => setActiveTab("search")} />
-          <TabButton label="LIVE_MONITOR" active={activeTab === "live"} pulseDot onClick={() => setActiveTab("live")} />
+          <TabButton label="LAB" active={activeTab === "lab"} onClick={() => setActiveTab("lab")} />
+          <TabButton label="INVESTIGATE" active={activeTab === "search"} onClick={() => setActiveTab("search")} />
+          <TabButton label="LIVE_FEED" active={activeTab === "live"} pulseDot onClick={() => setActiveTab("live")} />
         </nav>
         <div className="ml-auto flex min-w-[300px] flex-wrap items-center justify-end gap-4">
           <div className="border border-terminal-danger/30 bg-terminal-danger/10 px-3 py-1 font-pixel text-[6px] uppercase text-terminal-danger">
@@ -36,7 +36,7 @@ export function Header({ activeTab, setActiveTab, alertCount, clock }) {
 
 export function SubHeader({ breadcrumb, threatLevel, activeAgents, infectedCount }) {
   return (
-    <div className="border-b border-slate-900 bg-[#0a0e14] px-3 py-3">
+    <div className="border-b border-white/5 bg-black/20 px-3 py-3 backdrop-blur-sm">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="font-mono text-[12px] text-terminal-cyan/85">{breadcrumb}</div>
         <div className="flex flex-wrap items-center gap-5 font-pixel text-[6px] uppercase">
@@ -60,7 +60,7 @@ export function SectionHeader({ label }) {
 
 export function FooterBar() {
   return (
-    <footer className="mt-6 border-t border-slate-900 py-4 font-mono text-[10px] text-slate-700">
+    <footer className="mt-6 border-t border-white/10 py-4 font-mono text-[10px] text-slate-600">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span>EPI-SIEM (C) 2026 | EPIDEMIOLOGY SECURITY INFORMATION & EVENT MANAGEMENT</span>
         <span>KERNEL:4.19.2 DB:0xEF21A RULES:8,847</span>
@@ -74,8 +74,10 @@ function TabButton({ label, active, onClick, pulseDot = false }) {
     <button
       type="button"
       onClick={onClick}
-      className={`relative border-b-2 px-4 py-3 transition ${
-        active ? "border-terminal-cyan bg-terminal-cyan/10 text-terminal-cyan" : "border-transparent hover:bg-terminal-cyan/5 hover:text-terminal-cyan"
+      className={`relative rounded-t-lg border-b-2 px-4 py-3 transition ${
+        active
+          ? "border-terminal-cyan bg-terminal-cyan/15 text-terminal-cyan shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
+          : "border-transparent hover:bg-white/5 hover:text-terminal-cyan"
       }`}
     >
       {label}

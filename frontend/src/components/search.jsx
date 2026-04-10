@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
   RESULT_TABS,
@@ -37,7 +38,8 @@ export function SearchTab({
   queryHelp,
   hints,
   liveContext,
-  onApplyScopeShortcut
+  onApplyScopeShortcut,
+  onFetchEventDetail
 }) {
   return (
     <section className="space-y-5 px-3 py-5">
@@ -108,54 +110,74 @@ export function SearchTab({
         </div>
       </div>
 
-      <div className="terminal-panel p-4">
-        <div className="mb-2 flex items-center justify-between font-pixel text-[6px] uppercase">
-          <span className="text-slate-500">INFECTION_TIMELINE - last 30 minutes</span>
-          <span className="text-terminal-danger">| infection events</span>
+      {timelineBars.length > 0 && (
+        <div className="terminal-panel p-4">
+          <div className="mb-2 flex items-center justify-between font-pixel text-[6px] uppercase">
+            <span className="text-slate-500">EVENT_TIMELINE</span>
+            <span className="text-terminal-danger">| events over time</span>
+          </div>
+          <div className="h-[88px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={timelineBars}>
+                <CartesianGrid stroke="rgba(55,65,81,0.18)" vertical={false} />
+                <XAxis dataKey="label" tick={{ fill: "#6b7280", fontSize: 10 }} axisLine={false} tickLine={false} />
+                <YAxis hide />
+                <Tooltip contentStyle={{ backgroundColor: "#080c11", border: "1px solid rgba(248,113,113,0.25)", color: "#d1d5db", fontFamily: "IBM Plex Mono", fontSize: 11 }} />
+                <Bar dataKey="value" fill="#f87171" radius={[1, 1, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
         </div>
-        <div className="h-[88px]">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={timelineBars}>
-              <CartesianGrid stroke="rgba(55,65,81,0.18)" vertical={false} />
-              <XAxis dataKey="label" tick={{ fill: "#6b7280", fontSize: 10 }} axisLine={false} tickLine={false} />
-              <YAxis hide />
-              <Tooltip contentStyle={{ backgroundColor: "#080c11", border: "1px solid rgba(248,113,113,0.25)", color: "#d1d5db", fontFamily: "IBM Plex Mono", fontSize: 11 }} />
-              <Bar dataKey="value" fill="#f87171" radius={[1, 1, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
+      )}
 
-      <div className="flex flex-wrap gap-1 border-b border-slate-800">
+      <div className="flex flex-wrap gap-1 border-b border-white/10">
         {RESULT_TABS.map((tab) => (
           <button
             key={tab}
             type="button"
             onClick={() => setSearchTab(tab)}
-            className={`border border-b-0 px-4 py-3 font-pixel text-[6px] uppercase ${searchTab === tab ? "border-terminal-cyan/30 bg-terminal-panel text-terminal-cyan" : "border-slate-800 text-slate-600"}`}
+            className={`border border-b-0 px-4 py-3 font-pixel text-[6px] uppercase ${searchTab === tab ? "border-terminal-cyan/30 bg-terminal-panel text-terminal-cyan" : "border-white/10 text-slate-600"}`}
           >
             {tab.toUpperCase()}
           </button>
         ))}
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_260px]">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_280px]">
         <div className="space-y-4">
           <EventsTable events={searchEvents} selectedEvent={selectedEvent} setSelectedEventId={setSelectedEventId} />
-          {selectedEvent ? <EventDetail selectedEvent={selectedEvent} /> : null}
+          {selectedEvent ? (
+            <EventDetail
+              selectedEvent={selectedEvent}
+              onFetchEventDetail={onFetchEventDetail}
+              onRunSearch={onRunSearch}
+              setSearchQuery={setSearchQuery}
+            />
+          ) : null}
           <ResultPanel tab={searchTab} patternCards={patternCards} statisticsCards={statisticsCards} intelligenceCards={intelligenceCards} timelineBars={timelineBars} />
         </div>
-        <SearchSidebar sidebarPivots={sidebarPivots} hints={hints} fieldsPayload={fieldsPayload} queryHelp={queryHelp} />
+        <SearchSidebar sidebarPivots={sidebarPivots} hints={hints} queryHelp={queryHelp} />
       </div>
     </section>
   );
 }
 
 function EventsTable({ events, selectedEvent, setSelectedEventId }) {
+  if (!events.length) {
+    return (
+      <div className="terminal-panel p-8 text-center">
+        <div className="font-pixel text-[8px] uppercase text-slate-600">NO_RESULTS</div>
+        <div className="mt-3 font-mono text-[12px] text-slate-500">
+          query returned 0 events — adjust filters or time range
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="terminal-panel overflow-hidden">
       <table className="w-full border-collapse">
-        <thead className="border-b border-slate-800 bg-[#0c1118]">
+        <thead className="border-b border-white/10 bg-[#0c1118]">
           <tr className="font-pixel text-[6px] uppercase text-terminal-cyan">
             {["TIME", "EVENT_TYPE", "SOURCE", "DESTINATION", "PAYLOAD_HASH", "SEVERITY"].map((label) => (
               <th key={label} className="px-3 py-3 text-left">
@@ -169,13 +191,13 @@ function EventsTable({ events, selectedEvent, setSelectedEventId }) {
             <tr
               key={event.id}
               onClick={() => setSelectedEventId(event.id)}
-              className={`cursor-pointer border-b border-slate-900 ${index % 2 === 0 ? "bg-[#0b1016]" : "bg-[#0d1117]"} ${selectedEvent?.id === event.id ? "bg-terminal-cyan/10" : ""}`}
+              className={`cursor-pointer border-b border-white/10 ${index % 2 === 0 ? "bg-[#0b1016]" : "bg-[#0d1117]"} ${selectedEvent?.id === event.id ? "bg-terminal-cyan/10" : ""}`}
             >
               <td className="px-3 py-4 text-slate-500">{event.timestamp}</td>
               <td className={`px-3 py-4 ${eventTypeClass(event.event_type)}`}>{event.event_type}</td>
-              <td className="px-3 py-4 text-terminal-info">{event.src_agent}</td>
-              <td className="px-3 py-4 text-terminal-purple">{event.dst_agent}</td>
-              <td className="px-3 py-4 text-terminal-purple/80">{event.payload_hash}</td>
+              <td className="px-3 py-4 text-terminal-info">{event.src_agent || "-"}</td>
+              <td className="px-3 py-4 text-terminal-purple">{event.dst_agent || "-"}</td>
+              <td className="px-3 py-4 text-terminal-purple/80">{event.payload_hash || "-"}</td>
               <td className="px-3 py-4">
                 <span className={`border px-2 py-1 font-pixel text-[5px] uppercase ${severityBadgeClass(event.severity)}`}>{event.severity}</span>
               </td>
@@ -187,39 +209,141 @@ function EventsTable({ events, selectedEvent, setSelectedEventId }) {
   );
 }
 
-function EventDetail({ selectedEvent }) {
-  const values = [
+function EventDetail({ selectedEvent, onFetchEventDetail, onRunSearch, setSearchQuery }) {
+  const [revealedPayload, setRevealedPayload] = useState(null);
+  const [revealLoading, setRevealLoading] = useState(false);
+
+  useEffect(() => { setRevealedPayload(null); }, [selectedEvent.event_id]);
+
+  async function handleRevealPayload() {
+    if (!selectedEvent.event_id || !onFetchEventDetail) return;
+    setRevealLoading(true);
+    try {
+      const detail = await onFetchEventDetail(selectedEvent.event_id, true);
+      setRevealedPayload(detail?.event || null);
+    } catch {
+      setRevealedPayload(null);
+    } finally {
+      setRevealLoading(false);
+    }
+  }
+
+  function pivot(query) {
+    setSearchQuery(query);
+    onRunSearch(query);
+  }
+
+  const coreFields = [
+    ["event_id", selectedEvent.event_id || selectedEvent.id, "text-slate-300"],
     ["timestamp", selectedEvent.timestamp, "text-slate-300"],
     ["event_type", selectedEvent.event_type, eventTypeClass(selectedEvent.event_type)],
     ["src_agent", selectedEvent.src_agent, "text-terminal-info"],
     ["dst_agent", selectedEvent.dst_agent, "text-terminal-purple"],
-    ["payload_hash", selectedEvent.payload_hash, "text-terminal-purple"],
     ["severity", selectedEvent.severity, severityTextClass(selectedEvent.severity)],
-    ["subnet", selectedEvent.subnet, "text-slate-400"],
-    ["bytes_transferred", String(selectedEvent.bytes_transferred), "text-terminal-info"],
-    ["dest_port", String(selectedEvent.dest_port), "text-terminal-cyan"]
+    ["payload_hash", selectedEvent.payload_hash, "text-terminal-purple"],
+    ["reset_id", selectedEvent.reset_id || "-", "text-slate-400"],
+    ["epoch", String(selectedEvent.epoch ?? "-"), "text-terminal-cyan"],
   ];
+
+  const metadataFields = [
+    selectedEvent.attack_type && ["attack_type", selectedEvent.attack_type, "text-terminal-warn"],
+    selectedEvent.state_after && ["state_after", selectedEvent.state_after, "text-slate-400"],
+    selectedEvent.kill_chain_stage && ["kill_chain_stage", selectedEvent.kill_chain_stage, "text-terminal-warn"],
+    selectedEvent.epidemic_state && ["epidemic_state", selectedEvent.epidemic_state, "text-terminal-purple"],
+    selectedEvent.epidemic_state_before && ["epidemic_state_before", selectedEvent.epidemic_state_before, "text-slate-400"],
+    selectedEvent.cognition_tier && ["cognition_tier", selectedEvent.cognition_tier, "text-terminal-info"],
+    selectedEvent.decision_source && ["decision_source", selectedEvent.decision_source, "text-terminal-cyan"],
+    selectedEvent.quarantine_trigger && ["quarantine_trigger", selectedEvent.quarantine_trigger, "text-terminal-warn"],
+    selectedEvent.semantic_family && ["semantic_family", selectedEvent.semantic_family, "text-terminal-info"],
+    selectedEvent.mutation_type && ["mutation_type", selectedEvent.mutation_type, "text-terminal-purple"],
+    selectedEvent.decode_status && ["decode_status", selectedEvent.decode_status, "text-slate-400"],
+    selectedEvent.payload_wrapper_type && ["wrapper_type", selectedEvent.payload_wrapper_type, "text-slate-400"],
+    selectedEvent.campaign_id && ["campaign_id", selectedEvent.campaign_id, "text-terminal-cyan"],
+    (selectedEvent.mutation_v !== "" && selectedEvent.mutation_v != null) && ["mutation_v", String(selectedEvent.mutation_v), "text-terminal-purple"],
+  ].filter(Boolean);
+
+  const allFields = [...coreFields, ...metadataFields];
 
   return (
     <div className="terminal-panel p-4">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="font-pixel text-[7px] uppercase text-terminal-cyan">EVENT_DETAIL</div>
         <div className="flex flex-wrap gap-2">
-          {["PIVOT_ON_SRC", "PIVOT_ON_DST", "TRACE_PATH", "ADD_TO_WATCH"].map((action) => (
-            <button key={action} type="button" className="border border-terminal-cyan/20 px-3 py-2 font-pixel text-[6px] uppercase text-terminal-cyan">
-              {action}
+          {selectedEvent.src_agent && (
+            <button type="button" onClick={() => pivot(`src=${selectedEvent.src_agent}`)} className="border border-terminal-cyan/20 px-3 py-2 font-pixel text-[6px] uppercase text-terminal-cyan">
+              PIVOT_SRC
             </button>
-          ))}
+          )}
+          {selectedEvent.injection_id && (
+            <button type="button" onClick={() => pivot(`injection_id=${selectedEvent.injection_id}`)} className="border border-terminal-cyan/20 px-3 py-2 font-pixel text-[6px] uppercase text-terminal-cyan">
+              TRACE
+            </button>
+          )}
+          {selectedEvent.payload_hash && (
+            <button type="button" onClick={() => pivot(`payload_hash=${selectedEvent.payload_hash}`)} className="border border-terminal-cyan/20 px-3 py-2 font-pixel text-[6px] uppercase text-terminal-purple">
+              LINEAGE
+            </button>
+          )}
+          {selectedEvent.payload_text_available && !revealedPayload && (
+            <button
+              type="button"
+              onClick={handleRevealPayload}
+              disabled={revealLoading}
+              className="border border-terminal-warn/30 px-3 py-2 font-pixel text-[6px] uppercase text-terminal-warn"
+            >
+              {revealLoading ? "LOADING..." : "REVEAL_PAYLOAD"}
+            </button>
+          )}
         </div>
       </div>
+
       <div className="grid gap-4 md:grid-cols-3">
-        {values.map(([field, value, valueClass]) => (
-          <div key={field} className="border border-slate-900 bg-[#0b1016] p-3">
+        {allFields.map(([field, value, valueClass]) => (
+          <div key={field} className="border border-white/10 bg-[#0b1016] p-3">
             <div className="font-pixel text-[6px] uppercase text-terminal-cyan/70">{field}</div>
-            <div className={`mt-2 font-mono text-[13px] ${valueClass}`}>{value}</div>
+            <div className={`mt-2 font-mono text-[13px] break-all ${valueClass}`}>{value || "-"}</div>
           </div>
         ))}
       </div>
+
+      {(selectedEvent.payload_preview || selectedEvent.decoded_payload_preview) && (
+        <div className="mt-4 space-y-3">
+          {selectedEvent.payload_preview && (
+            <div className="border border-white/10 bg-[#0b1016] p-3">
+              <div className="font-pixel text-[6px] uppercase text-terminal-warn/70">payload_preview</div>
+              <div className="mt-2 font-mono text-[12px] text-slate-400 break-all whitespace-pre-wrap">{selectedEvent.payload_preview}</div>
+            </div>
+          )}
+          {selectedEvent.decoded_payload_preview && (
+            <div className="border border-white/10 bg-[#0b1016] p-3">
+              <div className="font-pixel text-[6px] uppercase text-terminal-info/70">decoded_payload_preview</div>
+              <div className="mt-2 font-mono text-[12px] text-slate-400 break-all whitespace-pre-wrap">{selectedEvent.decoded_payload_preview}</div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {revealedPayload && (
+        <div className="mt-4 space-y-3">
+          {revealedPayload.payload_text && (
+            <div className="border border-terminal-warn/20 bg-[#0b1016] p-3">
+              <div className="font-pixel text-[6px] uppercase text-terminal-warn">FULL_PAYLOAD</div>
+              <pre className="mt-2 max-h-[200px] overflow-auto font-mono text-[11px] text-slate-400 whitespace-pre-wrap break-all">{revealedPayload.payload_text}</pre>
+            </div>
+          )}
+          {revealedPayload.decoded_payload_text && (
+            <div className="border border-terminal-info/20 bg-[#0b1016] p-3">
+              <div className="font-pixel text-[6px] uppercase text-terminal-info">DECODED_PAYLOAD</div>
+              <pre className="mt-2 max-h-[200px] overflow-auto font-mono text-[11px] text-slate-400 whitespace-pre-wrap break-all">{revealedPayload.decoded_payload_text}</pre>
+            </div>
+          )}
+          {!revealedPayload.payload_text && !revealedPayload.decoded_payload_text && (
+            <div className="border border-white/10 bg-[#0b1016] p-3 font-mono text-[12px] text-slate-600">
+              no payload data available for this event
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -228,32 +352,42 @@ function ResultPanel({ tab, patternCards, statisticsCards, intelligenceCards, ti
   if (tab === "events") return null;
 
   if (tab === "visualization") {
+    if (!timelineBars.length) {
+      return (
+        <div className="terminal-panel p-6 text-center font-mono text-[12px] text-slate-600">
+          no visualization data available
+        </div>
+      );
+    }
     return (
       <div className="terminal-panel p-4">
         <div className="mb-3 font-pixel text-[7px] uppercase text-terminal-cyan">VISUALIZATION_OVERVIEW</div>
-        <div className="grid gap-4 lg:grid-cols-2">
-          <div className="border border-slate-900 p-3">
-            <div className="mb-2 font-mono text-[12px] text-slate-500">Propagation sparkline</div>
-            <div className="h-[120px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={timelineBars}>
-                  <CartesianGrid stroke="rgba(55,65,81,0.18)" vertical={false} />
-                  <XAxis dataKey="label" tick={{ fill: "#6b7280", fontSize: 10 }} axisLine={false} tickLine={false} />
-                  <YAxis hide />
-                  <Bar dataKey="value" fill="#22d3ee" radius={[2, 2, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-          <div className="border border-slate-900 p-3 font-mono text-[11px] text-slate-500">
-            <pre className="overflow-auto whitespace-pre-wrap leading-6">{`[AGT-001] ---> [AGT-004] ---> [DNS-01]\n   |             |               |\n   +--> [AGT-006] ----X----> [BARRIER-B]\n                 \\\n                  +--> [AGT-009] ---> [203.0.113.7]`}</pre>
+        <div className="border border-white/10 p-3">
+          <div className="mb-2 font-mono text-[12px] text-slate-500">Event distribution</div>
+          <div className="h-[120px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={timelineBars}>
+                <CartesianGrid stroke="rgba(55,65,81,0.18)" vertical={false} />
+                <XAxis dataKey="label" tick={{ fill: "#6b7280", fontSize: 10 }} axisLine={false} tickLine={false} />
+                <YAxis hide />
+                <Bar dataKey="value" fill="#22d3ee" radius={[2, 2, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
           </div>
         </div>
       </div>
     );
   }
 
-  const cards = tab === "patterns" ? patternCards : tab === "statistics" ? statisticsCards : intelligenceCards;
+  const cards = { patterns: patternCards, statistics: statisticsCards, intelligence: intelligenceCards }[tab] ?? [];
+
+  if (!cards.length) {
+    return (
+      <div className="terminal-panel p-6 text-center font-mono text-[12px] text-slate-600">
+        no {tab} data available
+      </div>
+    );
+  }
 
   return (
     <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -271,12 +405,17 @@ function ResultPanel({ tab, patternCards, statisticsCards, intelligenceCards, ti
   );
 }
 
-function SearchSidebar({ sidebarPivots, hints, fieldsPayload, queryHelp }) {
+function SearchSidebar({ sidebarPivots, hints, queryHelp }) {
+  const pivotFields = Object.keys(sidebarPivots);
+
   return (
     <div className="space-y-4">
       <div className="terminal-panel p-4">
         <div className="mb-4 font-pixel text-[7px] uppercase text-terminal-cyan">FIELD_PIVOT</div>
-        {["src_agent", "event_type", "severity"].map((group) => (
+        {pivotFields.length === 0 && (
+          <div className="font-mono text-[12px] text-slate-600">no field data</div>
+        )}
+        {pivotFields.map((group) => (
           <div key={group} className="mb-5">
             <div className="mb-2 font-mono text-[12px] text-terminal-cyan/80">{group}</div>
             <div className="space-y-2">
@@ -296,22 +435,23 @@ function SearchSidebar({ sidebarPivots, hints, fieldsPayload, queryHelp }) {
         ))}
       </div>
 
-      <div className="terminal-panel p-4">
-        <div className="mb-3 font-pixel text-[7px] uppercase text-terminal-warn">ANALYTIC_HINTS</div>
-        <div className="space-y-3 font-mono text-[12px] text-slate-500">
-          {hints.slice(0, 4).map((hint, index) => (
-            <div key={`${index}-${typeof hint === "string" ? hint : hint.title}`}>
-              <span className="mr-2 text-terminal-warn">&gt;</span>
-              {typeof hint === "string" ? hint : hint.title || hint.reason || hint.message}
-            </div>
-          ))}
+      {hints.length > 0 && (
+        <div className="terminal-panel p-4">
+          <div className="mb-3 font-pixel text-[7px] uppercase text-terminal-warn">ANALYTIC_HINTS</div>
+          <div className="space-y-3 font-mono text-[12px] text-slate-500">
+            {hints.slice(0, 4).map((hint, index) => (
+              <div key={`${index}-${typeof hint === "string" ? hint : hint.title}`}>
+                <span className="mr-2 text-terminal-warn">&gt;</span>
+                {typeof hint === "string" ? hint : hint.title || hint.reason || hint.message}
+              </div>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="terminal-panel p-4">
         <div className="mb-3 font-pixel text-[7px] uppercase text-terminal-cyan">QUERY_GUIDE</div>
         <div className="space-y-2 font-mono text-[11px] text-slate-500">
-          <div>interesting_fields={Object.keys(fieldsPayload?.interesting_fields || {}).length}</div>
           {(queryHelp?.operators || []).slice(0, 4).map((item) => (
             <div key={item.syntax}>
               <span className="text-terminal-cyan">{item.syntax}</span> :: {item.description}

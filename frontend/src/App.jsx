@@ -1,14 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { fetchJson } from "./api";
 import { FooterBar, Header, SubHeader } from "./components/chrome";
+import { ControlsOverlay } from "./components/controls/ControlsOverlay";
 import { LiveTab } from "./components/live";
+import { PixelLabView } from "./components/lab/PixelLabView";
 import { SearchTab } from "./components/search";
-import { SimulationTab } from "./components/simulation";
+import { usePixelLabController } from "./pixel/hooks/usePixelLabController";
+import { sortAgentIdsForLab } from "./agents/agentIdentity";
 import {
-  FALLBACK_EVENTS,
   TAB_LABELS,
-  buildFallbackHints,
-  buildFieldPivots,
+  buildFieldPivotsFromApi,
   buildIntelligenceCards,
   buildPatternCards,
   buildSimulationMetrics,
@@ -16,12 +17,13 @@ import {
   buildTimelineData,
   computeLiveMetrics,
   deriveAgentCards,
+  matchLiveFilter,
   normalizeLiveEvent,
   normalizeSearchEvent,
 } from "./data";
 
 function App() {
-  const [activeTab, setActiveTab] = useState("simulation");
+  const [activeTab, setActiveTab] = useState("lab");
   const [difficulty, setDifficulty] = useState("medium");
   const [simRunning, setSimRunning] = useState(false);
   const [controlStatus, setControlStatus] = useState("system idle :: control plane nominal");
@@ -47,11 +49,19 @@ function App() {
   const [liveLatestId, setLiveLatestId] = useState(0);
   const [liveMetricsPayload, setLiveMetricsPayload] = useState(null);
   const [liveConnected, setLiveConnected] = useState(true);
+  const [selectedInjectionTarget, setSelectedInjectionTarget] = useState("auto");
+  const [selectedQuarantineTarget, setSelectedQuarantineTarget] = useState("auto");
   const liveFeedRef = useRef(null);
   const liveAutoScrollRef = useRef(true);
   const liveLatestIdRef = useRef(0);
   const searchRequestRef = useRef(0);
+  const controlRefreshInFlightRef = useRef(false);
+  const liveRefreshInFlightRef = useRef(false);
+  const searchBootstrappedRef = useRef(false);
+  const liveBootstrappedRef = useRef(false);
   const [sessionId] = useState(() => `SIM_${Math.floor(11 + Math.random() * 999999).toString(16).padStart(6, "0")}`);
+  const pixelLab = usePixelLabController(controlState);
+  const pixelLabBootComplete = pixelLab.ready || Boolean(pixelLab.error);
 
   useEffect(() => {
     const timer = window.setInterval(() => setClock(new Date()), 1000);
@@ -59,27 +69,51 @@ function App() {
   }, []);
 
   useEffect(() => {
-    fetchQueryHelp();
     refreshControlState();
-    refreshLive(true);
-    runSearch("event=INFECTION_SUCCESSFUL");
     const timer = window.setInterval(refreshControlState, 6000);
     return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
+    if (!pixelLabBootComplete || liveBootstrappedRef.current) return;
+    liveBootstrappedRef.current = true;
+    refreshLive(true);
+  }, [pixelLabBootComplete]);
+
+  useEffect(() => {
+    if (activeTab !== "search") return;
+    fetchQueryHelp();
+    if (searchBootstrappedRef.current) return;
+    searchBootstrappedRef.current = true;
+    runSearch(searchQuery);
+  }, [activeTab, searchQuery]);
+
+  const topologyView = useMemo(() => controlState?.epidemic?.topology || { topology: controlState?.topology || {}, agents: [] }, [controlState]);
+  const injectionTargets = useMemo(() => {
+    const targets = topologyView?.injection_targets;
+    if (Array.isArray(targets) && targets.length) return targets;
+    return Object.entries(topologyView?.topology || {})
+      .filter(([, node]) => Boolean(node?.can_receive_injection))
+      .map(([agentId]) => agentId);
+  }, [topologyView]);
+  const quarantineTargets = useMemo(
+    () => Object.keys(controlState?.agents || {}),
+    [controlState]
+  );
+
+  useEffect(() => {
     if (!simRunning) return undefined;
     const interval = window.setInterval(runSimulationPulse, 15000);
     return () => window.clearInterval(interval);
-  }, [simRunning, difficulty]);
+  }, [simRunning, difficulty, selectedInjectionTarget, injectionTargets]);
 
   useEffect(() => {
-    if (livePaused) return undefined;
+    if (livePaused || !pixelLabBootComplete) return undefined;
     const interval = window.setInterval(() => {
       refreshLive();
     }, 1500);
     return () => window.clearInterval(interval);
-  }, [livePaused]);
+  }, [livePaused, pixelLabBootComplete]);
 
   useEffect(() => {
     liveLatestIdRef.current = liveLatestId;
@@ -92,8 +126,7 @@ function App() {
   }, [liveEvents, activeTab]);
 
   const searchEvents = useMemo(() => {
-    const apiEvents = (searchPayload?.events || []).map(normalizeSearchEvent);
-    const events = apiEvents.length ? apiEvents : FALLBACK_EVENTS;
+    const events = (searchPayload?.events || []).map(normalizeSearchEvent);
 
     if (activeSearchFilter === "all") return events;
 
@@ -121,26 +154,50 @@ function App() {
   }, [searchEvents, selectedEventId]);
 
   const agents = useMemo(() => deriveAgentCards(controlState), [controlState]);
+  const labAgents = useMemo(() => {
+    if (!agents.length) return [];
+    const order = sortAgentIdsForLab(agents.map((c) => c.id));
+    const map = Object.fromEntries(agents.map((c) => [c.id, c]));
+    return order.map((id) => map[id]).filter(Boolean);
+  }, [agents]);
   const simMetrics = useMemo(() => buildSimulationMetrics(controlState, healthState, simRunning), [controlState, healthState, simRunning]);
   const breadcrumb = `epi / siem / ${TAB_LABELS[activeTab]}`;
-  const infectedCount = useMemo(() => agents.filter((agent) => agent.state === "INFECTED").length, [agents]);
+  const infectedCount = useMemo(() => agents.filter((agent) => agent.isEpidemicInfected).length, [agents]);
   const alertCount = useMemo(() => {
+    const backendActiveAlerts = Number(controlState?.alerts?.active_count);
+    const infectionStateAlerts = Number.isFinite(backendActiveAlerts) ? backendActiveAlerts : infectedCount;
     const criticalSearch = searchEvents.filter((event) => event.severity === "CRITICAL").length;
     const criticalLive = liveEvents.filter((event) => event.severity === "CRITICAL").length;
-    return criticalSearch + criticalLive + infectedCount;
-  }, [infectedCount, liveEvents, searchEvents]);
+    return Math.max(infectionStateAlerts, criticalSearch + criticalLive);
+  }, [controlState, infectedCount, liveEvents, searchEvents]);
   const liveMetrics = useMemo(() => computeLiveMetrics(liveEvents, liveMetricsPayload), [liveEvents, liveMetricsPayload]);
   const visibleLiveEvents = useMemo(() => {
     if (liveFilter === "all") return liveEvents;
-    return liveEvents.filter((event) => event.type.toLowerCase().includes(liveFilter));
+    return liveEvents.filter((event) => matchLiveFilter(event.type, liveFilter));
   }, [liveEvents, liveFilter]);
-  const sidebarPivots = useMemo(() => buildFieldPivots(searchEvents), [searchEvents]);
+  const sidebarPivots = useMemo(() => buildFieldPivotsFromApi(fieldsPayload), [fieldsPayload]);
   const timelineBars = useMemo(() => buildTimelineData(searchPayload?.timeline), [searchPayload]);
   const statisticsCards = useMemo(() => buildStatsCards(statsPayload), [statsPayload]);
   const patternCards = useMemo(() => buildPatternCards(searchPayload, statsPayload), [searchPayload, statsPayload]);
   const intelligenceCards = useMemo(() => buildIntelligenceCards(searchPayload, statsPayload, hintsPayload), [searchPayload, statsPayload, hintsPayload]);
 
+  useEffect(() => {
+    if (selectedInjectionTarget === "auto" || selectedInjectionTarget === "all") return;
+    if (!injectionTargets.includes(selectedInjectionTarget)) {
+      setSelectedInjectionTarget("auto");
+    }
+  }, [injectionTargets, selectedInjectionTarget]);
+
+  useEffect(() => {
+    if (selectedQuarantineTarget === "auto") return;
+    if (!quarantineTargets.includes(selectedQuarantineTarget)) {
+      setSelectedQuarantineTarget("auto");
+    }
+  }, [quarantineTargets, selectedQuarantineTarget]);
+
   async function refreshControlState() {
+    if (controlRefreshInFlightRef.current) return;
+    controlRefreshInFlightRef.current = true;
     try {
       const [control, health] = await Promise.all([fetchJson("/dashboard/state"), fetchJson("/api/health")]);
       setControlState(control);
@@ -149,6 +206,8 @@ function App() {
     } catch (error) {
       setLiveConnected(false);
       setControlStatus(`telemetry degraded :: ${error.message}`);
+    } finally {
+      controlRefreshInFlightRef.current = false;
     }
   }
 
@@ -161,17 +220,24 @@ function App() {
   }
 
   async function refreshLive(forceFull = false) {
+    if (liveRefreshInFlightRef.current) return;
+    liveRefreshInFlightRef.current = true;
     try {
       const params = new URLSearchParams({
         after_id: forceFull ? "0" : String(liveLatestIdRef.current),
         limit: "120",
         q: ""
       }).toString();
-      const payload = await fetchJson(`/api/live?${params}`);
+      const [payload, epidemicMetrics, c2Metrics] = await Promise.all([
+        fetchJson(`/api/live?${params}`),
+        fetchJson("/api/epidemic/metrics"),
+        fetchJson("/api/c2/metrics"),
+      ]);
       const normalizedEvents = (payload.events || []).map(normalizeLiveEvent);
+      pixelLab.adapter.ingest(normalizedEvents);
 
       setLiveConnected(true);
-      setLiveMetricsPayload(payload.metrics || null);
+      setLiveMetricsPayload({ ...(payload.metrics || {}), epidemicMetrics, c2Metrics });
       setLiveLatestId(Number(payload.latest_id || 0));
       setLiveEvents((previous) => {
         if (forceFull || !liveLatestIdRef.current) {
@@ -189,6 +255,8 @@ function App() {
     } catch (error) {
       setLiveConnected(false);
       setControlStatus(`live stream degraded :: ${error.message}`);
+    } finally {
+      liveRefreshInFlightRef.current = false;
     }
   }
 
@@ -238,11 +306,39 @@ function App() {
     return payload;
   }
 
+  function resolveInjectionTargets() {
+    if (!injectionTargets.length) return [];
+    if (selectedInjectionTarget === "all") return injectionTargets;
+    if (selectedInjectionTarget !== "auto") return [selectedInjectionTarget];
+    return [injectionTargets[0]];
+  }
+
+  function resolveQuarantineTarget() {
+    if (!quarantineTargets.length) return "";
+    if (selectedQuarantineTarget !== "auto") return selectedQuarantineTarget;
+    const priorityTarget = agents.find((agent) => agent.isEpidemicInfected)?.id;
+    return priorityTarget || quarantineTargets[0];
+  }
+
   async function runSimulationPulse() {
     const wormLevel = difficulty === "hard" || difficulty === "nightmare" ? "difficult" : difficulty;
 
     try {
-      await postControl("/inject/agent-c", { worm_level: wormLevel });
+      const targets = resolveInjectionTargets();
+      if (!targets.length) {
+        throw new Error("no injection-capable agents in active topology");
+      }
+      const results = await Promise.all(
+        targets.map((target) =>
+          fetchJson(`/inject/${target}`, {
+            method: "POST",
+            body: JSON.stringify({ worm_level: wormLevel })
+          })
+        )
+      );
+      pixelLab.adapter.cue({ type: "inject", targets });
+      setControlStatus(`inject :: ${targets.join(", ")} :: ${JSON.stringify(results)}`);
+      await refreshControlState();
       await refreshLive(true);
     } catch (error) {
       setControlStatus(`simulation pulse failed :: ${error.message}`);
@@ -263,6 +359,7 @@ function App() {
     }
 
     if (action === "vaccine") {
+      pixelLab.adapter.cue({ type: "vaccine" });
       await postControl("/vaccine");
       await refreshLive(true);
       setControlStatus("vaccine deployed :: temporary defense boost active");
@@ -270,13 +367,20 @@ function App() {
     }
 
     if (action === "quarantine") {
-      await postControl("/quarantine/agent-c");
+      const target = resolveQuarantineTarget();
+      if (!target) {
+        setControlStatus("quarantine skipped :: no agent available");
+        return;
+      }
+      pixelLab.adapter.cue({ type: "quarantine", target });
+      await postControl(`/quarantine/${target}`);
       await refreshLive(true);
       return;
     }
 
     if (action === "reset") {
       setSimRunning(false);
+      pixelLab.adapter.cue({ type: "reset" });
       await postControl("/reset");
       await refreshLive(true);
     }
@@ -287,23 +391,26 @@ function App() {
     liveAutoScrollRef.current = node.scrollTop + node.clientHeight >= node.scrollHeight - 24;
   }
 
+  async function fetchEventDetail(eventId, includePayload = false) {
+    const params = includePayload ? "?include_full_payload=true" : "";
+    return fetchJson(`/api/event/${eventId}${params}`);
+  }
+
+  function applyQuery(query) {
+    setSearchQuery(query);
+    runSearch(query);
+  }
+
   function handleSaveSearch(run) {
     setActiveSearchRun(run.id);
-    setSearchQuery(run.query);
-    runSearch(run.query);
+    applyQuery(run.query);
   }
 
   function applyScopeShortcut(scope) {
-    if (scope === "current_reset" && liveMetrics.currentResetId) {
-      const query = `reset_id=${liveMetrics.currentResetId}`;
-      setSearchQuery(query);
-      runSearch(query);
-    }
-    if (scope === "current_run" && liveMetrics.currentResetId && liveMetrics.currentEpoch !== undefined) {
-      const query = `reset_id=${liveMetrics.currentResetId} AND epoch=${liveMetrics.currentEpoch}`;
-      setSearchQuery(query);
-      runSearch(query);
-    }
+    if (scope === "current_reset" && liveMetrics.currentResetId)
+      applyQuery(`reset_id=${liveMetrics.currentResetId}`);
+    if (scope === "current_run" && liveMetrics.currentResetId && liveMetrics.currentEpoch !== undefined)
+      applyQuery(`reset_id=${liveMetrics.currentResetId} AND epoch=${liveMetrics.currentEpoch}`);
   }
 
   function exportLiveFeed() {
@@ -324,59 +431,82 @@ function App() {
         <SubHeader breadcrumb={breadcrumb} activeAgents={simMetrics.agentsOnline.value} infectedCount={infectedCount} threatLevel={simMetrics.infectionRate.subLabel} />
         <main className="flex-1">
           <div key={activeTab} className="tab-enter">
-            {activeTab === "simulation" ? (
-              <SimulationTab difficulty={difficulty} setDifficulty={setDifficulty} metrics={simMetrics} agents={agents} controlStatus={controlStatus} onControlAction={handleControlAction} />
-            ) : null}
-            {activeTab === "search" ? (
-              <SearchTab
-                activeSearchRun={activeSearchRun}
-                onSaveSearch={handleSaveSearch}
-                searchQuery={searchQuery}
-                setSearchQuery={setSearchQuery}
-                searchMode={searchMode}
-                setSearchMode={setSearchMode}
-                timeRange={timeRange}
-                setTimeRange={setTimeRange}
-                activeSearchFilter={activeSearchFilter}
-                setActiveSearchFilter={setActiveSearchFilter}
-                searchTab={searchTab}
-                setSearchTab={setSearchTab}
-                searchBusy={searchBusy}
-                onRunSearch={runSearch}
-                searchEvents={searchEvents}
-                selectedEvent={selectedEvent}
-                setSelectedEventId={setSelectedEventId}
-                timelineBars={timelineBars}
-                sidebarPivots={sidebarPivots}
-                statisticsCards={statisticsCards}
-                patternCards={patternCards}
-                intelligenceCards={intelligenceCards}
-                fieldsPayload={fieldsPayload}
-                queryHelp={queryHelp}
-                hints={hintsPayload?.hints || buildFallbackHints()}
-                liveContext={liveMetrics}
-                onApplyScopeShortcut={applyScopeShortcut}
-              />
-            ) : null}
-            {activeTab === "live" ? (
-              <LiveTab
-                liveMetrics={liveMetrics}
-                livePaused={livePaused}
-                setLivePaused={setLivePaused}
-                liveFilter={liveFilter}
-                setLiveFilter={setLiveFilter}
-                visibleLiveEvents={visibleLiveEvents}
-                onClear={() => setLiveEvents([])}
-                onExport={exportLiveFeed}
-                liveFeedRef={liveFeedRef}
-                onScroll={handleLiveScroll}
-                sessionId={sessionId}
-                liveConnected={liveConnected}
-                onRefresh={() => refreshLive(true)}
-              />
-            ) : null}
+            {{
+              lab: (
+                <PixelLabView
+                  agents={labAgents}
+                  controlAgents={controlState?.agents}
+                  controller={pixelLab}
+                  controlStatus={controlStatus}
+                />
+              ),
+              search: (
+                <SearchTab
+                  activeSearchRun={activeSearchRun}
+                  onSaveSearch={handleSaveSearch}
+                  searchQuery={searchQuery}
+                  setSearchQuery={setSearchQuery}
+                  searchMode={searchMode}
+                  setSearchMode={setSearchMode}
+                  timeRange={timeRange}
+                  setTimeRange={setTimeRange}
+                  activeSearchFilter={activeSearchFilter}
+                  setActiveSearchFilter={setActiveSearchFilter}
+                  searchTab={searchTab}
+                  setSearchTab={setSearchTab}
+                  searchBusy={searchBusy}
+                  onRunSearch={runSearch}
+                  searchEvents={searchEvents}
+                  selectedEvent={selectedEvent}
+                  setSelectedEventId={setSelectedEventId}
+                  timelineBars={timelineBars}
+                  sidebarPivots={sidebarPivots}
+                  statisticsCards={statisticsCards}
+                  patternCards={patternCards}
+                  intelligenceCards={intelligenceCards}
+                  fieldsPayload={fieldsPayload}
+                  queryHelp={queryHelp}
+                  hints={hintsPayload?.hints || []}
+                  liveContext={liveMetrics}
+                  onApplyScopeShortcut={applyScopeShortcut}
+                  onFetchEventDetail={fetchEventDetail}
+                />
+              ),
+              live: (
+                <LiveTab
+                  liveMetrics={liveMetrics}
+                  livePaused={livePaused}
+                  setLivePaused={setLivePaused}
+                  liveFilter={liveFilter}
+                  setLiveFilter={setLiveFilter}
+                  visibleLiveEvents={visibleLiveEvents}
+                  onClear={() => setLiveEvents([])}
+                  onExport={exportLiveFeed}
+                  liveFeedRef={liveFeedRef}
+                  onScroll={handleLiveScroll}
+                  sessionId={sessionId}
+                  liveConnected={liveConnected}
+                  onRefresh={() => refreshLive(true)}
+                />
+              ),
+            }[activeTab]}
           </div>
         </main>
+        {activeTab === "lab" ? (
+          <ControlsOverlay
+            difficulty={difficulty}
+            setDifficulty={setDifficulty}
+            controlStatus={controlStatus}
+            onControlAction={handleControlAction}
+            injectionTargets={injectionTargets}
+            selectedInjectionTarget={selectedInjectionTarget}
+            setSelectedInjectionTarget={setSelectedInjectionTarget}
+            quarantineTargets={quarantineTargets}
+            selectedQuarantineTarget={selectedQuarantineTarget}
+            setSelectedQuarantineTarget={setSelectedQuarantineTarget}
+            labController={pixelLab}
+          />
+        ) : null}
         <FooterBar />
       </div>
     </div>
