@@ -209,6 +209,17 @@ class WorldDB:
             );
             """
         )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS world_structures (
+                structure_id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                col INTEGER NOT NULL,
+                row INTEGER NOT NULL,
+                placed_by TEXT NOT NULL DEFAULT 'guardian',
+                round_id INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1
+            )
+        """)
         conn.commit()
 
     # ──────────────────────────────────────────────────────────────
@@ -375,6 +386,31 @@ class WorldDB:
             {"agent_id": r[0], "col": int(r[1]), "row": int(r[2]), "zone": r[3], "updated_round": int(r[4])}
             for r in cur.fetchall()
         ]
+
+    def insert_structure(self, s: dict) -> None:
+        def tx():
+            self._conn.execute(
+                """INSERT INTO world_structures
+                   (structure_id, type, col, row, placed_by, round_id, active)
+                   VALUES (:structure_id, :type, :col, :row, :placed_by, :round_id, 1)""",
+                s,
+            )
+        self.run_tx(tx)
+
+    def deactivate_structure(self, structure_id: str) -> None:
+        def tx():
+            self._conn.execute(
+                "UPDATE world_structures SET active=0 WHERE structure_id=?",
+                (structure_id,),
+            )
+        self.run_tx(tx)
+
+    def list_active_structures(self) -> list[dict]:
+        cur = self._get_conn().execute(
+            "SELECT structure_id, type, col, row, placed_by, round_id, active FROM world_structures WHERE active=1"
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def upsert_quarantine_edge(self, record: Dict[str, Any]) -> None:
         conn = self._get_conn()
