@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 import httpx
 from pydantic import BaseModel
@@ -47,6 +47,20 @@ if str(_SHARED_DIR) not in sys.path:
 
 from topology import get_topology, agent_roles as topology_agent_roles, get_role
 from epidemic import epidemic_state_code, epidemic_state_from_agent_state, is_infected_epidemic_state
+
+try:
+    from world_db import WorldConfig, WorldDB
+    from world_engine import PersistentWorldEngine
+except ImportError:  # pragma: no cover
+    from orchestrator.world_db import WorldConfig, WorldDB
+    from orchestrator.world_engine import PersistentWorldEngine
+
+try:
+    from world_spatial import WorldSpatialEngine
+    from world_structures import WorldStructureEngine, StructureType
+except ImportError:  # pragma: no cover
+    from orchestrator.world_spatial import WorldSpatialEngine
+    from orchestrator.world_structures import WorldStructureEngine, StructureType
 
 
 EVENT_STREAM_KEY = "events_stream"
@@ -149,6 +163,10 @@ c2_engine = C2Engine(emit_event=_c2_emit_to_stream)
 strain_store = StrainStore()
 strain_engine = StrainEngine(strain_store, run_id=RUN_ID, emit_to_stream=_c2_emit_to_stream)
 epidemic_tracker = EpidemicTracker()
+WORLD_ENGINE_ENABLED = _env_truthy("WORLD_ENGINE_ENABLED", "1")
+world_db: WorldDB | None = None
+world_engine: PersistentWorldEngine | None = None
+world_round_lock = asyncio.Lock()
 
 if (FRONTEND_DIST_DIR / "assets").exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST_DIR / "assets"), name="frontend-assets")
@@ -1325,6 +1343,143 @@ def _dashboard_state_payload() -> Dict[str, Any]:
     }
 
 
+async def _world_emit_event(event_name: str, *, src: str, dst: str, metadata: Dict[str, Any] | None = None) -> None:
+    event_data = {
+        "ts": str(time.time()),
+        "src": src,
+        "dst": dst,
+        "event": event_name,
+        "payload": "",
+        "metadata": metadata or {},
+    }
+    await _c2_emit_to_stream(event_data)
+
+
+def _world_agent_state_label(contamination: float, quarantine_status: str) -> tuple[str, str]:
+    if quarantine_status in {"hard", "appeal_allowed"}:
+        return "QUARANTINED", "Q"
+    if contamination >= 0.75:
+        return "INFECTED", "I_x"
+    if contamination >= 0.50:
+        return "INFECTED", "I_c"
+    if contamination >= 0.30:
+        return "INFECTED", "I_r"
+    if contamination >= 0.15:
+        return "EXPOSED", "E"
+    return "HEALTHY", "S"
+
+
+def _world_state_payload() -> Dict[str, Any]:
+    if world_db is None:
+        raise RuntimeError("world_db_unavailable")
+    agents_rows = world_db.list_agents()
+    latest_round = world_db.get_latest_round_id()
+    system_state = world_db.get_system_state()
+    messages = world_db.list_messages(after_round=max(0, latest_round - 30), limit=240)
+    agents: Dict[str, Dict[str, Any]] = {}
+    infected = 0
+    quarantined = 0
+    for row in agents_rows:
+        aid = str(row.get("agent_id") or "")
+        role = str(row.get("role") or AGENT_ROLES.get(aid, "agent"))
+        contamination = float(row.get("contamination_level", 0.0) or 0.0)
+        quarantine_status = str(row.get("quarantine_status", "none") or "none")
+        state, epidemic_state = _world_agent_state_label(contamination, quarantine_status)
+        if state == "INFECTED":
+            infected += 1
+        if state == "QUARANTINED":
+            quarantined += 1
+        mem = str(row.get("memory_summary", "") or "")
+        agents[aid] = {
+            "id": aid,
+            "role": role,
+            "state": state,
+            "epidemic_state": epidemic_state,
+            "epidemic_last_updated": latest_round,
+            "cognition_tier": "world_llm",
+            "last_event": "WORLD_ROUND",
+            "last_seen": latest_round,
+            "contamination_level": round(contamination, 4),
+            "quarantine_status": quarantine_status,
+            "global_trust": round(float(row.get("global_trust", 0.0) or 0.0), 4),
+            "influence_weight": round(float(row.get("influence_weight", 0.0) or 0.0), 4),
+            "last_active_round": int(row.get("last_active_round", 0) or 0),
+            "memory_summary": mem[:512] if len(mem) > 512 else mem,
+        }
+    events = [
+        {
+            "id": msg.get("message_id", ""),
+            "event_id": msg.get("message_id", ""),
+            "ts": msg.get("created_ts", 0),
+            "src": msg.get("sender", ""),
+            "dst": msg.get("receiver", ""),
+            "event": "WORLD_MESSAGE",
+            "attack_type": msg.get("intent", ""),
+            "payload_preview": str(msg.get("message_text", "") or "")[:240],
+            "strain_family": msg.get("strain_family", ""),
+            "round_id": msg.get("round_id", 0),
+        }
+        for msg in reversed(messages)
+    ]
+    infection_pressure = float(system_state.get("global_infection_pressure", 0.0) or 0.0)
+    guardian_pressure = float(system_state.get("guardian_pressure_score", 0.0) or 0.0)
+    return {
+        "status": "running",
+        "mode": "persistent_world",
+        "latest_id": len(events),
+        "events": events,
+        "topology": TOPOLOGY,
+        "agents": agents,
+        "alerts": {"active_count": infected, "infected_count": infected, "suppressed_count": 0, "items": []},
+        "c2": {"metrics": {"active_c2_sessions": 0, "c2_exfil_attempts": 0}},
+        "epidemic": {
+            "state": {"round_id": latest_round, "agents": list(agents.values())},
+            "metrics": {
+                "infected_count": infected,
+                "quarantine_count": quarantined,
+                "spread_breadth": infected,
+                "r_ai": round(max(0.0, infection_pressure + (infected / max(1, len(agents_rows)))), 3),
+                "world_round_id": latest_round,
+                "global_infection_pressure": infection_pressure,
+                "guardian_pressure_score": guardian_pressure,
+                "guardian_degradation_level": system_state.get("guardian_degradation_level", "G0_HEALTHY"),
+            },
+            "topology": {
+                "topology": {k: {"can_receive_injection": (k != "guardian")} for k in AGENT_IDS},
+                "agents": list(AGENT_IDS),
+                "injection_targets": [agent_id for agent_id in AGENT_IDS if agent_id != "guardian"],
+            },
+        },
+        "analytics": {},
+    }
+
+
+def _prime_world_activity() -> None:
+    if world_db is None:
+        return
+
+    def _tx():
+        seeded = False
+        for row in world_db.list_agents():
+            aid = str(row.get("agent_id") or "")
+            if aid != "courier-1":
+                continue
+            updated = dict(row)
+            if not str(updated.get("memory_summary", "") or "").strip():
+                updated["memory_summary"] = (
+                    "seed_memory: suspicious relay instructions observed; validate with analysts before forwarding."
+                )
+                seeded = True
+            if float(updated.get("contamination_level", 0.0) or 0.0) < 0.32:
+                updated["contamination_level"] = 0.32
+                seeded = True
+            if seeded:
+                world_db.upsert_agent_state(updated)
+            break
+        return seeded
+
+    world_db.run_tx(_tx)
+
 def _get_latest_run_started_ts() -> str:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
@@ -1478,7 +1633,7 @@ async def _sync_primary_events_nonblocking(*, limit: int = 2000, force: bool = F
 
 @app.on_event("startup")
 async def startup_event():
-    global _beacon_forward_queue, _beacon_forward_worker_task
+    global _beacon_forward_queue, _beacon_forward_worker_task, world_db, world_engine
     epidemic_tracker.reset()
     c2_engine.reset()
     await redis_client.setnx(SIMULATION_EPOCH_KEY, "0")
@@ -1507,11 +1662,18 @@ async def startup_event():
         )
     asyncio.create_task(consume_events(start_id))
     asyncio.create_task(_telemetry_integrity_loop())
+    if WORLD_ENGINE_ENABLED:
+        world_db = WorldDB(WorldConfig.from_env())
+        world_engine = PersistentWorldEngine(world_db, emit_event=_world_emit_event)
+        world_engine.ensure_seeded_world(
+            agents=[(agent_id, AGENT_ROLES.get(agent_id, "agent")) for agent_id in AGENT_IDS]
+        )
+        _prime_world_activity()
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    global _beacon_client, _beacon_forward_worker_task
+    global _beacon_client, _beacon_forward_worker_task, world_db, world_engine
     await redis_client.xadd(
         EVENT_STREAM_KEY,
         {
@@ -1532,6 +1694,12 @@ async def shutdown_event():
     if _beacon_client is not None:
         await _beacon_client.aclose()
         _beacon_client = None
+    if world_engine is not None:
+        await world_engine.close()
+        world_engine = None
+    if world_db is not None:
+        world_db.close()
+        world_db = None
 
 
 async def consume_events(start_id: str):
@@ -1631,9 +1799,105 @@ async def get_events(
 @app.get("/dashboard/state")
 async def get_dashboard_state():
     try:
+        if WORLD_ENGINE_ENABLED and world_db is not None:
+            return await asyncio.to_thread(_world_state_payload)
         return await asyncio.to_thread(_dashboard_state_payload)
     except Exception as exc:
         return {"status": "error", "error": str(exc), "events": [], "latest_id": 0}
+
+
+@app.get("/api/world/state")
+async def api_world_state():
+    if not WORLD_ENGINE_ENABLED or world_db is None:
+        raise HTTPException(status_code=503, detail="Persistent world engine is disabled")
+    return await asyncio.to_thread(_world_state_payload)
+
+
+@app.post("/api/world/advance")
+async def api_world_advance():
+    if not WORLD_ENGINE_ENABLED or world_engine is None:
+        raise HTTPException(status_code=503, detail="Persistent world engine is disabled")
+    async with world_round_lock:
+        result = await world_engine.advance_one_round()
+    return {
+        "ok": bool(result.ok),
+        "reason": result.reason,
+        "round_id": result.round_id,
+        "selected_agent": result.selected_agent,
+        "action": result.action,
+        "created_message_id": result.created_message_id,
+        "terminal": bool(result.terminal),
+        "stalled": bool(result.stalled),
+    }
+
+
+@app.post("/api/world/reset")
+async def api_world_reset():
+    global world_db, world_engine
+    if not WORLD_ENGINE_ENABLED:
+        raise HTTPException(status_code=503, detail="Persistent world engine is disabled")
+    cfg = WorldConfig.from_env()
+    db_path = Path(cfg.db_path)
+    if world_engine is not None:
+        await world_engine.close()
+        world_engine = None
+    if world_db is not None:
+        world_db.close()
+        world_db = None
+    if db_path.exists():
+        db_path.unlink()
+    world_db = WorldDB(cfg)
+    world_engine = PersistentWorldEngine(world_db, emit_event=_world_emit_event)
+    world_engine.ensure_seeded_world(
+        agents=[(agent_id, AGENT_ROLES.get(agent_id, "agent")) for agent_id in AGENT_IDS]
+    )
+    _prime_world_activity()
+    return {"ok": True, "status": "world_reset", "agents_seeded": len(AGENT_IDS)}
+
+
+@app.post("/api/world/vaccine")
+async def api_world_vaccine():
+    if not WORLD_ENGINE_ENABLED or world_db is None:
+        raise HTTPException(status_code=503, detail="Persistent world engine is disabled")
+
+    def _tx():
+        changed = 0
+        for row in world_db.list_agents():
+            updated = dict(row)
+            before = float(updated.get("contamination_level", 0.0) or 0.0)
+            after = max(0.0, before - 0.25)
+            updated["contamination_level"] = after
+            world_db.upsert_agent_state(updated)
+            if after != before:
+                changed += 1
+        return changed
+
+    changed = world_db.run_tx(_tx)
+    return {"ok": True, "status": "vaccine_applied", "agents_updated": int(changed)}
+
+
+@app.post("/api/world/quarantine/{agent_id}")
+async def api_world_quarantine(agent_id: str):
+    if not WORLD_ENGINE_ENABLED or world_db is None:
+        raise HTTPException(status_code=503, detail="Persistent world engine is disabled")
+    validated = _validated_agent_id(agent_id)
+
+    def _tx():
+        target = None
+        for row in world_db.list_agents():
+            if str(row.get("agent_id")) == validated:
+                target = row
+                break
+        if target is None:
+            return False
+        updated = dict(target)
+        updated["quarantine_status"] = "hard"
+        world_db.upsert_agent_state(updated)
+        return True
+
+    if not world_db.run_tx(_tx):
+        raise HTTPException(status_code=404, detail="Agent not found in world state")
+    return {"ok": True, "status": "quarantined", "agent": validated}
 
 
 @app.get("/api/search")
@@ -2720,3 +2984,49 @@ async def apply_vaccine():
         "epoch": epoch,
         "reset_id": reset_id,
     }
+
+
+@app.get("/api/world/spatial")
+async def get_world_spatial():
+    try:
+        positions = await asyncio.get_event_loop().run_in_executor(
+            None, world_db.list_agent_positions
+        )
+        contacts = WorldSpatialEngine.proximity_contacts(positions, radius=4)
+        return {"positions": positions, "proximity_contacts": contacts}
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/world/structures")
+async def get_world_structures():
+    try:
+        structs = await asyncio.get_event_loop().run_in_executor(
+            None, world_db.list_active_structures
+        )
+        return {"structures": structs}
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.post("/api/world/structures")
+async def place_world_structure(body: dict):
+    try:
+        sid = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: WorldStructureEngine.place(world_db, body),
+        )
+        return {"structure_id": sid, "ok": True}
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.delete("/api/world/structures/{structure_id}")
+async def remove_world_structure(structure_id: str):
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            None, lambda: WorldStructureEngine.remove(world_db, structure_id)
+        )
+        return {"ok": True}
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
