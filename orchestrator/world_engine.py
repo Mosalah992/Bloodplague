@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+
+_rng = random.Random()
 
 import httpx
 
@@ -322,7 +325,6 @@ class PersistentWorldEngine:
             "guardian_id": "guardian",
             "pending_inbound": pending_inbound,
             "unresolved_questions": unresolved_questions,
-            "quarantine_appeals": {},
             "quarantine_appeals": quarantine_appeals,
             "contradictory_analyst_reports": contradictory_analyst_reports,
             "recent_trust_changes": recent_trust_changes,
@@ -475,10 +477,9 @@ class PersistentWorldEngine:
 
         self.db.run_tx(tx_apply)
 
-        # Update spatial position for selected agent
+        # Update spatial position for selected agent (wall-aware)
         pos = self.db.get_agent_position(selected_agent)
         if pos:
-            import random
             role_map = self._agent_role_map()
             role = role_map.get(selected_agent, "")
             zone_targets = {
@@ -487,18 +488,26 @@ class PersistentWorldEngine:
                 "guardian": (8, 52),
             }
             default_target = zone_targets.get(role, (40, 30))
-            target_col = default_target[0] + random.randint(-6, 6)
-            target_row = default_target[1] + random.randint(-4, 4)
+            target_col = default_target[0] + _rng.randint(-6, 6)
+            target_row = default_target[1] + _rng.randint(-4, 4)
             new_col, new_row = WorldSpatialEngine.move_toward(
                 pos["col"], pos["row"], target_col, target_row, speed=2
             )
-            self.db.upsert_agent_position({
-                "agent_id": selected_agent,
-                "col": new_col,
-                "row": new_row,
-                "zone": WorldSpatialEngine.zone_for(new_col, new_row),
-                "updated_round": round_id,
-            })
+            # Reject move if it lands on a wall tile or active structure
+            try:
+                from world_structures import WorldStructureEngine
+            except ImportError:
+                from orchestrator.world_structures import WorldStructureEngine
+            blocked = WorldStructureEngine.is_blocked(self.db, col=new_col, row=new_row)
+            passable = WorldSpatialEngine.is_passable(new_col, new_row)
+            if not blocked and passable:
+                self.db.upsert_agent_position({
+                    "agent_id": selected_agent,
+                    "col": new_col,
+                    "row": new_row,
+                    "zone": WorldSpatialEngine.zone_for(new_col, new_row),
+                    "updated_round": round_id,
+                })
 
         # Emit proximity contact events (cap at 3 per round)
         all_positions = self.db.list_agent_positions()
@@ -613,8 +622,12 @@ class PersistentWorldEngine:
                     "infection_vector": bool(parsed.get("infection_vector", False)),
                 },
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            await self.emit_event(
+                "CONVERSATION_FAILED",
+                src=agent_a, dst=agent_b,
+                metadata={"round_id": round_id, "reason": f"exception:{type(exc).__name__}:{exc}"},
+            )
 
     async def _llm_select_action(self, *, round_id: int, actor: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
         # v1 action schema: send one message, quarantine one agent, or take no action.

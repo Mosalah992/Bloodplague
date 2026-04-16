@@ -1,6 +1,9 @@
 import { OfficeState } from '../office/engine/officeState.js';
+import { TileType } from '../office/types.js';
 import { getTileMap, getZoneForTile, isWorldWalkable } from './worldMap.js';
 import type { ZoneId } from '../constants.js';
+
+type TileTypeVal = (typeof TileType)[keyof typeof TileType];
 
 export interface AgentWorldPosition {
   agentId: string;
@@ -24,7 +27,7 @@ export class WorldState extends OfficeState {
 
   constructor() {
     super();
-    this.tileMap = getTileMap() as any;
+    this.tileMap = getTileMap() as TileTypeVal[][];
     this.blockedTiles = this._buildWorldBlockedTiles();
     this.walkableTiles = this._buildWorldWalkableTiles();
   }

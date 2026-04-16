@@ -71,3 +71,29 @@ class WorldSpatialEngine:
         if agent_id in AGENT_SPAWN_OVERRIDES:
             return AGENT_SPAWN_OVERRIDES[agent_id]
         return ROLE_SPAWN.get(role, (10, 10))
+
+    @staticmethod
+    def is_passable(col: int, row: int) -> bool:
+        """Return True if (col, row) is within world bounds and not on a zone border wall.
+
+        Zone border walls are the 1-tile perimeter of each zone, except for the
+        explicitly opened doorways — mirroring the tile map built in worldMap.ts.
+        """
+        if col < 0 or col >= WORLD_COLS or row < 0 or row >= WORLD_ROWS:
+            return False
+        # Doorway openings (col, row) that override border walls
+        _DOORWAYS: frozenset[tuple[int, int]] = frozenset({
+            (19, 10), (19, 11), (19, 12),
+            (10, 40), (11, 40), (12, 40),
+            (55, 8),  (55, 9),  (55, 10),
+            (40, 20), (41, 20), (42, 20),
+            (55, 24), (56, 24), (57, 24),
+            (40, 40), (41, 40), (42, 40),
+        })
+        if (col, row) in _DOORWAYS:
+            return True
+        for _zone, (c0, r0, c1, r1) in ZONE_BOUNDARIES.items():
+            if col == c0 or col == c1 or row == r0 or row == r1:
+                if c0 <= col <= c1 and r0 <= row <= r1:
+                    return False  # on a zone border wall
+        return True

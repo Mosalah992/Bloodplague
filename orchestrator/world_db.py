@@ -220,6 +220,15 @@ class WorldDB:
                 active INTEGER NOT NULL DEFAULT 1
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS contamination_tiles (
+                tile_key TEXT PRIMARY KEY,
+                col INTEGER NOT NULL,
+                row INTEGER NOT NULL,
+                level REAL NOT NULL DEFAULT 0.0,
+                updated_round INTEGER NOT NULL DEFAULT 0
+            )
+        """)
         conn.commit()
 
     # ──────────────────────────────────────────────────────────────
@@ -411,6 +420,27 @@ class WorldDB:
         )
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def upsert_contamination_tile(self, col: int, row: int, level: float, updated_round: int = 0) -> None:
+        conn = self._get_conn()
+        key = f"{col},{row}"
+        if level < 0.01:
+            conn.execute("DELETE FROM contamination_tiles WHERE tile_key=?", (key,))
+        else:
+            conn.execute(
+                """INSERT INTO contamination_tiles (tile_key, col, row, level, updated_round)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(tile_key) DO UPDATE SET
+                     level=excluded.level, updated_round=excluded.updated_round""",
+                (key, col, row, min(1.0, level), updated_round),
+            )
+        conn.commit()
+
+    def list_contamination_tiles(self) -> list[dict]:
+        cur = self._get_conn().execute(
+            "SELECT col, row, level FROM contamination_tiles WHERE level >= 0.01"
+        )
+        return [{"col": r[0], "row": r[1], "level": r[2]} for r in cur.fetchall()]
 
     def upsert_quarantine_edge(self, record: Dict[str, Any]) -> None:
         conn = self._get_conn()

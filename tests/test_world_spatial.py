@@ -53,3 +53,42 @@ def test_move_toward():
         col=10, row=10, target_col=14, target_row=10, speed=2
     )
     assert new_pos == (12, 10)
+
+
+def test_is_passable_floor():
+    # Interior of hub zone is passable
+    assert WorldSpatialEngine.is_passable(5, 5)
+
+
+def test_is_passable_wall():
+    # Zone border walls are impassable (hub left edge: col=0)
+    assert not WorldSpatialEngine.is_passable(0, 10)
+
+
+def test_is_passable_doorway():
+    # Doorways open through walls
+    assert WorldSpatialEngine.is_passable(19, 10)  # hub ↔ analyst_bay
+    assert WorldSpatialEngine.is_passable(10, 40)  # hub ↔ guardian_fortress
+
+
+def test_is_passable_out_of_bounds():
+    assert not WorldSpatialEngine.is_passable(-1, 0)
+    assert not WorldSpatialEngine.is_passable(0, 60)
+
+
+def test_contamination_tile_crud():
+    db = _db()
+    db.upsert_contamination_tile(10, 20, 0.5, updated_round=1)
+    tiles = db.list_contamination_tiles()
+    assert len(tiles) == 1
+    assert tiles[0]["col"] == 10
+    assert tiles[0]["row"] == 20
+    assert abs(tiles[0]["level"] - 0.5) < 0.001
+
+
+def test_contamination_tile_delete_on_low_level():
+    db = _db()
+    db.upsert_contamination_tile(5, 5, 0.8, updated_round=1)
+    db.upsert_contamination_tile(5, 5, 0.005, updated_round=2)  # below threshold
+    tiles = db.list_contamination_tiles()
+    assert len(tiles) == 0

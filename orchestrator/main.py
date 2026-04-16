@@ -2988,10 +2988,10 @@ async def apply_vaccine():
 
 @app.get("/api/world/spatial")
 async def get_world_spatial():
+    if not WORLD_ENGINE_ENABLED or world_db is None:
+        raise HTTPException(status_code=503, detail="Persistent world engine is disabled")
     try:
-        positions = await asyncio.get_event_loop().run_in_executor(
-            None, world_db.list_agent_positions
-        )
+        positions = await asyncio.to_thread(world_db.list_agent_positions)
         contacts = WorldSpatialEngine.proximity_contacts(positions, radius=4)
         return {"positions": positions, "proximity_contacts": contacts}
     except Exception as exc:
@@ -3000,10 +3000,10 @@ async def get_world_spatial():
 
 @app.get("/api/world/structures")
 async def get_world_structures():
+    if not WORLD_ENGINE_ENABLED or world_db is None:
+        raise HTTPException(status_code=503, detail="Persistent world engine is disabled")
     try:
-        structs = await asyncio.get_event_loop().run_in_executor(
-            None, world_db.list_active_structures
-        )
+        structs = await asyncio.to_thread(world_db.list_active_structures)
         return {"structures": structs}
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -3011,11 +3011,10 @@ async def get_world_structures():
 
 @app.post("/api/world/structures")
 async def place_world_structure(body: dict):
+    if not WORLD_ENGINE_ENABLED or world_db is None:
+        raise HTTPException(status_code=503, detail="Persistent world engine is disabled")
     try:
-        sid = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: WorldStructureEngine.place(world_db, body),
-        )
+        sid = await asyncio.to_thread(lambda: WorldStructureEngine.place(world_db, body))
         return {"structure_id": sid, "ok": True}
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -3023,10 +3022,21 @@ async def place_world_structure(body: dict):
 
 @app.delete("/api/world/structures/{structure_id}")
 async def remove_world_structure(structure_id: str):
+    if not WORLD_ENGINE_ENABLED or world_db is None:
+        raise HTTPException(status_code=503, detail="Persistent world engine is disabled")
     try:
-        await asyncio.get_event_loop().run_in_executor(
-            None, lambda: WorldStructureEngine.remove(world_db, structure_id)
-        )
+        await asyncio.to_thread(lambda: WorldStructureEngine.remove(world_db, structure_id))
         return {"ok": True}
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/world/contamination")
+async def get_world_contamination():
+    if not WORLD_ENGINE_ENABLED or world_db is None:
+        raise HTTPException(status_code=503, detail="Persistent world engine is disabled")
+    try:
+        tiles = await asyncio.to_thread(world_db.list_contamination_tiles)
+        return {"contamination_tiles": tiles}
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)

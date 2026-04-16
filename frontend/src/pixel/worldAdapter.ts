@@ -122,7 +122,14 @@ export class WorldAdapter {
     for (const ev of events) {
       const id = String(ev.id ?? '');
       if (id && this.seenEventIds.has(id)) continue;
-      if (id) this.seenEventIds.add(id);
+      if (id) {
+        this.seenEventIds.add(id);
+        // Evict oldest entries once cap is reached to prevent unbounded growth
+        if (this.seenEventIds.size > 1000) {
+          const first = this.seenEventIds.values().next().value;
+          if (first !== undefined) this.seenEventIds.delete(first);
+        }
+      }
       this.applyEvent(ev);
     }
   }
@@ -147,7 +154,11 @@ export class WorldAdapter {
     }
 
     if (type.includes('QUARANTINE_EDGE_BLOCKED')) {
-      applyContaminationEvent(this.state, 44, 30, 0.4);
+      // Paint contamination at the quarantined agent's actual position
+      const targetPos = ev.dst ? this.state.agentPositions.get(ev.dst) : null;
+      const col = targetPos?.col ?? 44;
+      const row = targetPos?.row ?? 30;
+      applyContaminationEvent(this.state, col, row, 0.4);
     }
   }
 }
