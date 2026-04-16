@@ -1,7 +1,8 @@
 export const TAB_LABELS = {
-  lab: "lab",
+  lab: "epidemic_lab",
   search: "investigate",
-  live: "live_feed"
+  live: "live_feed",
+  world: "world_sim",
 };
 
 export const SEARCH_RUNS = [
@@ -73,7 +74,7 @@ export function matchLiveFilter(eventType, filter) {
     case "mutation": return t.includes("MUTATION") || t.includes("MUTANT");
     case "block": return t.includes("BLOCK") || t.includes("BLOCKED") || t === "PROPAGATION_SUPPRESSED";
     case "query": return t.includes("QUERY") || t.includes("RECON") || t.includes("PROBE");
-    case "transfer": return t.includes("TRANSFER") || t.includes("RELAY");
+    case "transfer": return t.includes("TRANSFER") || t.includes("RELAY") || t === "WORLD_MESSAGE";
     case "scan": return t.includes("SCAN") || t.includes("RECON");
     case "alert": return t.includes("ALERT") || t === "QUARANTINE_ADVISORY_SENT";
     default: return t.toLowerCase().includes(filter);
@@ -197,7 +198,8 @@ export function epidemicStateTone(state) {
 }
 
 export function isInfectedEpidemicState(state) {
-  return ["I_r", "I_c", "I_x", "P"].includes(String(state || ""));
+  const s = String(state || "").toLowerCase();
+  return ["i_r", "i_c", "i_x", "p"].includes(s);
 }
 
 function mapAgentStateFromEpidemic(epidemicState, fallbackState) {
@@ -235,7 +237,7 @@ function eventToTone(eventType) {
   if (t.includes("INFECTION") || t.includes("EXFIL")) return "red";
   if (t.includes("MUTATION")) return "purple";
   if (t.includes("BLOCK") || t.includes("QUARANTINE")) return "amber";
-  if (t.includes("TRANSFER") || t.includes("RELAY")) return "green";
+  if (t.includes("TRANSFER") || t.includes("RELAY") || t.includes("WORLD_MESSAGE")) return "green";
   return "gray";
 }
 
@@ -314,11 +316,17 @@ export function normalizeLiveEvent(event, index = 0) {
     dstCountry: metadata.dst_country || "",
     payloadHash: event.payload_hash || metadata.payload_hash || "",
     parentPayloadHash: event.parent_payload_hash || metadata.parent_payload_hash || "",
-    semanticFamily: event.semantic_family || metadata.semantic_family || "",
+    semanticFamily:
+      event.semantic_family ||
+      metadata.semantic_family ||
+      event.strain_family ||
+      metadata.strain_family ||
+      "",
     mutationType: event.mutation_type || metadata.mutation_type || "",
     mutationVersion: event.mutation_v ?? metadata.mutation_v ?? "",
     strainId: event.strain_id || metadata.strain_id || "",
     strainSimilarityKey: event.strain_similarity_key || metadata.strain_similarity_key || "",
+    strainFamily: event.strain_family || metadata.strain_family || "",
     strainBranchingRecommended: Boolean(
       event.strain_branching_recommended ?? metadata.strain_branching_recommended
     ),

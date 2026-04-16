@@ -12,9 +12,10 @@ export function Header({ activeTab, setActiveTab, alertCount, clock }) {
           <div className="font-mono text-[11px] text-slate-500">v2.4.1-alpha</div>
         </div>
         <nav className="flex flex-wrap items-center gap-1 font-pixel text-[7px] uppercase text-slate-500">
-          <TabButton label="LAB" active={activeTab === "lab"} onClick={() => setActiveTab("lab")} />
+          <TabButton label="EPI_LAB" active={activeTab === "lab"} onClick={() => setActiveTab("lab")} />
           <TabButton label="INVESTIGATE" active={activeTab === "search"} onClick={() => setActiveTab("search")} />
           <TabButton label="LIVE_FEED" active={activeTab === "live"} pulseDot onClick={() => setActiveTab("live")} />
+          <TabButton label="WORLD_SIM" active={activeTab === "world"} onClick={() => setActiveTab("world")} />
         </nav>
         <div className="ml-auto flex min-w-[300px] flex-wrap items-center justify-end gap-4">
           <div className="border border-terminal-danger/30 bg-terminal-danger/10 px-3 py-1 font-pixel text-[6px] uppercase text-terminal-danger">

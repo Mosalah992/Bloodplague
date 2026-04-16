@@ -6,6 +6,7 @@ import { LiveTab } from "./components/live";
 import { PixelLabView } from "./components/lab/PixelLabView";
 import { SearchTab } from "./components/search";
 import { usePixelLabController } from "./pixel/hooks/usePixelLabController";
+import WorldView from "./components/world/WorldView.jsx";
 import { sortAgentIdsForLab } from "./agents/agentIdentity";
 import {
   TAB_LABELS,
@@ -21,6 +22,18 @@ import {
   normalizeLiveEvent,
   normalizeSearchEvent,
 } from "./data";
+
+async function fetchControlPlaneState() {
+  try {
+    return await fetchJson("/api/world/state");
+  } catch (error) {
+    const message = String(error?.message || error || "");
+    if (message.includes("503") || message.includes("Persistent world engine is disabled")) {
+      return fetchJson("/dashboard/state");
+    }
+    throw error;
+  }
+}
 
 function App() {
   const [activeTab, setActiveTab] = useState("lab");
@@ -199,7 +212,7 @@ function App() {
     if (controlRefreshInFlightRef.current) return;
     controlRefreshInFlightRef.current = true;
     try {
-      const [control, health] = await Promise.all([fetchJson("/dashboard/state"), fetchJson("/api/health")]);
+      const [control, health] = await Promise.all([fetchControlPlaneState(), fetchJson("/api/health")]);
       setControlState(control);
       setHealthState(health);
       setLiveConnected(true);
@@ -223,16 +236,21 @@ function App() {
     if (liveRefreshInFlightRef.current) return;
     liveRefreshInFlightRef.current = true;
     try {
-      const params = new URLSearchParams({
-        after_id: forceFull ? "0" : String(liveLatestIdRef.current),
-        limit: "120",
-        q: ""
-      }).toString();
-      const [payload, epidemicMetrics, c2Metrics] = await Promise.all([
-        fetchJson(`/api/live?${params}`),
-        fetchJson("/api/epidemic/metrics"),
-        fetchJson("/api/c2/metrics"),
-      ]);
+      const worldState = await fetchControlPlaneState();
+      const payload = {
+        events: worldState?.events || [],
+        latest_id: Number(worldState?.latest_id || 0),
+        metrics: {
+          current_epoch: Number(worldState?.epidemic?.metrics?.world_round_id || 0),
+          last_event_ts: worldState?.events?.[0]?.ts || "",
+          events_per_sec: 0.0,
+          blocked: 0,
+          infections: Number(worldState?.epidemic?.metrics?.infected_count || 0),
+          last_reset_id: "",
+        },
+      };
+      const epidemicMetrics = worldState?.epidemic?.metrics || {};
+      const c2Metrics = worldState?.c2?.metrics || {};
       const normalizedEvents = (payload.events || []).map(normalizeLiveEvent);
       pixelLab.adapter.ingest(normalizedEvents);
 
@@ -321,23 +339,16 @@ function App() {
   }
 
   async function runSimulationPulse() {
-    const wormLevel = difficulty === "hard" || difficulty === "nightmare" ? "difficult" : difficulty;
-
     try {
-      const targets = resolveInjectionTargets();
-      if (!targets.length) {
-        throw new Error("no injection-capable agents in active topology");
+      const response = await fetchJson("/api/world/advance", {
+        method: "POST",
+        body: JSON.stringify({ difficulty })
+      });
+      const actedAgent = response.selected_agent ? [response.selected_agent] : [];
+      if (actedAgent.length) {
+        pixelLab.adapter.cue({ type: "inject", targets: actedAgent });
       }
-      const results = await Promise.all(
-        targets.map((target) =>
-          fetchJson(`/inject/${target}`, {
-            method: "POST",
-            body: JSON.stringify({ worm_level: wormLevel })
-          })
-        )
-      );
-      pixelLab.adapter.cue({ type: "inject", targets });
-      setControlStatus(`inject :: ${targets.join(", ")} :: ${JSON.stringify(results)}`);
+      setControlStatus(`world round ${response.round_id} :: ${response.reason} :: actor=${response.selected_agent || "none"}`);
       await refreshControlState();
       await refreshLive(true);
     } catch (error) {
@@ -360,7 +371,7 @@ function App() {
 
     if (action === "vaccine") {
       pixelLab.adapter.cue({ type: "vaccine" });
-      await postControl("/vaccine");
+      await postControl("/api/world/vaccine");
       await refreshLive(true);
       setControlStatus("vaccine deployed :: temporary defense boost active");
       return;
@@ -373,7 +384,7 @@ function App() {
         return;
       }
       pixelLab.adapter.cue({ type: "quarantine", target });
-      await postControl(`/quarantine/${target}`);
+      await postControl(`/api/world/quarantine/${target}`);
       await refreshLive(true);
       return;
     }
@@ -381,7 +392,7 @@ function App() {
     if (action === "reset") {
       setSimRunning(false);
       pixelLab.adapter.cue({ type: "reset" });
-      await postControl("/reset");
+      await postControl("/api/world/reset");
       await refreshLive(true);
     }
   }
@@ -436,6 +447,7 @@ function App() {
                 <PixelLabView
                   agents={labAgents}
                   controlAgents={controlState?.agents}
+                  controlState={controlState}
                   controller={pixelLab}
                   controlStatus={controlStatus}
                 />
@@ -489,6 +501,7 @@ function App() {
                   onRefresh={() => refreshLive(true)}
                 />
               ),
+              world: <WorldView />,
             }[activeTab]}
           </div>
         </main>
