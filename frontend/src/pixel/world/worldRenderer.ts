@@ -6,9 +6,18 @@ import {
 import { getZoneMap, getZoneDef } from './worldMap.js';
 import { renderStructureLayer } from './structureLayer.js';
 import { renderAgentLayer } from './agentWorldRenderer.js';
+import { renderDecorLayer } from './worldDecorLayer.js';
 import { tileToIso, type CameraState } from './worldCamera.js';
 import type { WorldState } from './worldState.js';
 import { TileType } from '../office/types.js';
+
+// Per-zone ambient tint overlays (RGBA, very low alpha for subtle color grading)
+const ZONE_AMBIENT_TINT: Record<string, string> = {
+  guardian_fortress: 'rgba(30, 58, 138, 0.10)',   // cool steel blue
+  quarantine_block:  'rgba(127, 29, 29, 0.13)',    // sickly crimson
+  courier_zone:      'rgba(6, 64, 40, 0.08)',      // cyber green
+  analyst_bay:       'rgba(63, 29, 96, 0.10)',     // amber-violet
+};
 
 // Top-down floor palette keyed by TileType. Solid colors give a clean D2-style
 // ground plane — iso sprite assets are billboard-only now.
@@ -44,6 +53,23 @@ function drawIsoDiamond(
   ctx.rect(iso_x - ISO_HALF_W, iso_y, 2 * ISO_HALF_W, 2 * ISO_HALF_H);
 }
 
+
+function drawZoneAmbientTints(ctx: CanvasRenderingContext2D, state: WorldState): void {
+  for (const zone of WORLD_ZONES) {
+    const tint = ZONE_AMBIENT_TINT[zone.id];
+    if (!tint) continue;
+    const agentZone = state.selectedWorldAgentId ? state.getZoneForAgent(state.selectedWorldAgentId) : null;
+    const isVisible = !state.selectedWorldAgentId || state.debugMode || zone.id === agentZone;
+    if (!isVisible) continue;
+    const [tlx, tly] = tileToIso(zone.colMin, zone.rowMin);
+    const zw = (zone.colMax - zone.colMin + 1) * 2 * ISO_HALF_W;
+    const zh = (zone.rowMax - zone.rowMin + 1) * 2 * ISO_HALF_H;
+    ctx.save();
+    ctx.fillStyle = tint;
+    ctx.fillRect(tlx - ISO_HALF_W, tly, zw, zh);
+    ctx.restore();
+  }
+}
 
 function drawWorldLegibility(
   ctx: CanvasRenderingContext2D,
@@ -221,11 +247,17 @@ export function renderWorld(
     }
   }
 
+  // Per-zone ambient tint — drawn over floor tiles for color grading
+  drawZoneAmbientTints(ctx, state);
+
   drawWorldLegibility(ctx, state, elapsed);
   renderTerrainOverlay?.(ctx, elapsed);
 
-  // Structures and agents drawn on top
+  // Decorative dressing layer — drawn before structures so structures read on top
   const selectedAgentZone = state.selectedWorldAgentId ? state.getZoneForAgent(state.selectedWorldAgentId) : null;
+  renderDecorLayer(ctx, elapsed, selectedAgentZone, state.debugMode);
+
+  // Structures and agents drawn on top
   renderStructureLayer(ctx, state.structures, cam.zoom, elapsed, selectedAgentZone, state.debugMode);
   drawContactEffects(ctx, state);
   renderAgentLayer(ctx, state, elapsed);
