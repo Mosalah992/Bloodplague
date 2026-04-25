@@ -8,7 +8,6 @@ import WorldView from "./components/world/WorldView.jsx";
 import { OverviewTab } from "./components/overview/OverviewTab.jsx";
 import { TranscriptView } from "./components/transcript";
 import { TrustGraphView } from "./components/trust";
-import { usePixelLabController } from "./pixel/hooks/usePixelLabController";
 import {
   TAB_LABELS,
   buildFieldPivotsFromApi,
@@ -125,7 +124,6 @@ function App() {
   const liveBootstrappedRef = useRef(false);
   const [worldSubTab, setWorldSubTab] = useState("map");
   const [sessionId] = useState(() => `SIM_${Math.floor(11 + Math.random() * 999999).toString(16).padStart(6, "0")}`);
-  const labController = usePixelLabController(controlState);
   useEffect(() => {
     const timer = window.setInterval(() => setClock(new Date()), 1000);
     return () => window.clearInterval(timer);
@@ -610,7 +608,6 @@ function App() {
                           quarantineTargets,
                           selectedQuarantineTarget,
                           setSelectedQuarantineTarget,
-                          labController,
                         }}
                       />
                     </div>
