@@ -35,6 +35,7 @@ interface StructuresResponse {
     completed_round?: number;
     effect_radius?: number;
     hp?: number;
+    orientation?: string;
   }>;
 }
 
@@ -550,6 +551,7 @@ export class WorldAdapter {
         completedRound: Number(s.completed_round ?? 0),
         effectRadius: Number(s.effect_radius ?? 0),
         hp: Number(s.hp ?? 1),
+        orientation: (['N','E','S','W'].includes(String(s.orientation ?? 'N')) ? s.orientation : 'N') as 'N'|'E'|'S'|'W',
       })));
     } catch (err) {
       logFetchFailure('/api/world/structures', err);

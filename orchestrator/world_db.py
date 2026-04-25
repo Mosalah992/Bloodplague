@@ -486,6 +486,7 @@ class WorldDB:
             ("completed_round", "ALTER TABLE world_structures ADD COLUMN completed_round INTEGER NOT NULL DEFAULT 0"),
             ("effect_radius", "ALTER TABLE world_structures ADD COLUMN effect_radius INTEGER NOT NULL DEFAULT 0"),
             ("hp", "ALTER TABLE world_structures ADD COLUMN hp REAL NOT NULL DEFAULT 1.0"),
+            ("orientation", "ALTER TABLE world_structures ADD COLUMN orientation TEXT NOT NULL DEFAULT 'N'"),
         ):
             try:
                 conn.execute(ddl)
@@ -730,8 +731,8 @@ class WorldDB:
         def tx():
             self._get_conn().execute(
                 """INSERT INTO world_structures
-                   (structure_id, type, col, row, placed_by, round_id, state, progress, started_round, completed_round, effect_radius, hp, active)
-                   VALUES (:structure_id, :type, :col, :row, :placed_by, :round_id, :state, :progress, :started_round, :completed_round, :effect_radius, :hp, 1)""",
+                   (structure_id, type, col, row, placed_by, round_id, state, progress, started_round, completed_round, effect_radius, hp, orientation, active)
+                   VALUES (:structure_id, :type, :col, :row, :placed_by, :round_id, :state, :progress, :started_round, :completed_round, :effect_radius, :hp, :orientation, 1)""",
                 {
                     **s,
                     "state": str(s.get("state", "active")),
@@ -740,6 +741,7 @@ class WorldDB:
                     "completed_round": int(s.get("completed_round", s.get("round_id", 0))),
                     "effect_radius": int(s.get("effect_radius", 0)),
                     "hp": float(s.get("hp", 1.0)),
+                    "orientation": str(s.get("orientation", "N")),
                 },
             )
         self.run_tx(tx)
@@ -779,7 +781,7 @@ class WorldDB:
     def list_active_structures(self) -> list[dict]:
         cur = self._get_conn().execute(
             """SELECT structure_id, type, col, row, placed_by, round_id, state, progress,
-                      started_round, completed_round, effect_radius, hp, active
+                      started_round, completed_round, effect_radius, hp, orientation, active
                FROM world_structures WHERE active=1"""
         )
         cols = [d[0] for d in cur.description]

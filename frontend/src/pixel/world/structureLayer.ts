@@ -100,15 +100,32 @@ function isWallLike(type: string): boolean {
   return ORIENTED_STRUCTURE_TYPES.has(type);
 }
 
+function resolvedOrientation(struct: WorldStructure, structures: WorldStructure[]): 'N' | 'E' | 'S' | 'W' {
+  // Use backend-authored orientation when present and valid
+  if (struct.orientation && ['N','E','S','W'].includes(struct.orientation)) {
+    return struct.orientation;
+  }
+  // Fallback: infer from neighbor adjacency (wall-like types only)
+  if (ORIENTED_STRUCTURE_TYPES.has(struct.type)) {
+    const colRun = structures.some((s) => isWallLike(s.type) && s.col === struct.col && Math.abs(s.row - struct.row) === 1);
+    const rowRun = structures.some((s) => isWallLike(s.type) && s.row === struct.row && Math.abs(s.col - struct.col) === 1);
+    return colRun && !rowRun ? 'E' : 'N';
+  }
+  return 'N';
+}
+
 function structureSpriteName(struct: WorldStructure, structures: WorldStructure[]): string {
   const base = STRUCTURE_BASE_SPRITES[struct.type] ?? 'stoneColumn_N';
   if (!ORIENTED_STRUCTURE_TYPES.has(struct.type)) return base;
-
-  const rowRun = structures.some((s) => isWallLike(s.type) && s.row === struct.row && Math.abs(s.col - struct.col) === 1);
-  const colRun = structures.some((s) => isWallLike(s.type) && s.col === struct.col && Math.abs(s.row - struct.row) === 1);
-  const suffix = colRun && !rowRun ? 'E' : 'N';
-  return `${base}_${suffix}`;
+  return `${base}_${resolvedOrientation(struct, structures)}`;
 }
+
+const ORIENTATION_RADIANS: Record<string, number> = {
+  N: 0,
+  E: Math.PI / 2,
+  S: Math.PI,
+  W: -Math.PI / 2,
+};
 
 export function renderStructureLayer(
   ctx: CanvasRenderingContext2D,
@@ -122,11 +139,7 @@ export function renderStructureLayer(
   const sorted = [...structures].sort((a, b) => (a.col + a.row) - (b.col + b.row));
 
   for (const struct of sorted) {
-    const isVisible = !selectedAgentZone || debugMode || true; // structures are usually static/visible but we can dim them
-    // Actually, let's only dim if they are far away.
-    // For now, let's stick to the zone logic.
     const [ix, iy] = tileToIso(struct.col, struct.row);
-    // ...
     // Billboard sprite: feet anchored at the cell bottom-center.
     const cellBottomY = iy + 2 * ISO_HALF_H;
     const dx = ix - ISO_SPRITE_DRAW_W / 2;
@@ -192,13 +205,21 @@ export function renderStructureLayer(
       const assetScale = structureWorldAssetScale(struct.type, worldAsset);
       const drawW = naturalW * assetScale;
       const drawH = naturalH * assetScale;
-      const ax = ix;
-      const ay = cellBottomY - drawH / 2;
+      // Anchor center at cell middle — rotate around center
+      const cx = ix;
+      const cy = cellBottomY - drawH / 2;
+      const radians = ORIENTATION_RADIANS[resolvedOrientation(struct, sorted)] ?? 0;
 
       ctx.save();
       ctx.globalAlpha = state === 'constructing' ? 0.45 + progress * 0.35 : alpha;
       ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(worldAsset, ax - drawW / 2, ay - drawH / 2, drawW, drawH);
+      if (radians !== 0) {
+        ctx.translate(cx, cy);
+        ctx.rotate(radians);
+        ctx.drawImage(worldAsset, -drawW / 2, -drawH / 2, drawW, drawH);
+      } else {
+        ctx.drawImage(worldAsset, cx - drawW / 2, cy - drawH / 2, drawW, drawH);
+      }
       ctx.restore();
 
       ctx.save();

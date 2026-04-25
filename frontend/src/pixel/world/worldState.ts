@@ -74,6 +74,7 @@ export interface WorldStructure {
   completedRound: number;
   effectRadius: number;
   hp: number;
+  orientation: 'N' | 'E' | 'S' | 'W';
 }
 
 function _directionFromDelta(dc: number, dr: number): string {
