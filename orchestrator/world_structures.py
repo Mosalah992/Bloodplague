@@ -165,33 +165,58 @@ class WorldStructureEngine:
 
     @staticmethod
     def seed_defaults(db) -> int:
-        """Insert default world structures if none exist. Returns count added."""
+        """Insert default world structures if none exist. Returns count added.
+
+        World layout (30 cols × 18 rows):
+          hub            cols 0-6,  rows 0-10
+          analyst_bay    cols 7-18, rows 0-5
+          courier_zone   cols 19-29,rows 0-7
+          quarantine_block cols 12-18, rows 6-10
+          guardian_fortress cols 0-29, rows 11-17
+        """
         if db.list_active_structures():
             return 0
 
         defaults = [
-            # 40x30 world layout: defaults must stay inside the active map.
-            # Hub ↔ Analyst Bay checkpoints near the shared doorway.
-            {"type": StructureType.CHECKPOINT, "col": 9,  "row": 5},
-            {"type": StructureType.CHECKPOINT, "col": 10, "row": 6},
-            # Analyst Bay ↔ Courier Zone checkpoints near the shared doorway.
-            {"type": StructureType.CHECKPOINT, "col": 26, "row": 4},
-            {"type": StructureType.CHECKPOINT, "col": 27, "row": 5},
-            # Quarantine Block perimeter gate + walls at the fortress entrance.
-            {"type": StructureType.GATE,            "col": 20, "row": 20},
-            {"type": StructureType.QUARANTINE_WALL, "col": 22, "row": 20},
-            {"type": StructureType.QUARANTINE_WALL, "col": 23, "row": 20},
-            {"type": StructureType.QUARANTINE_WALL, "col": 24, "row": 20},
-            {"type": StructureType.QUARANTINE_WALL, "col": 20, "row": 21},
-            {"type": StructureType.QUARANTINE_WALL, "col": 20, "row": 22},
-            # Guardian Fortress watch posts along the current south entrance band.
-            {"type": StructureType.WATCH_POST, "col": 5,  "row": 21},
-            {"type": StructureType.WATCH_POST, "col": 15, "row": 21},
-            {"type": StructureType.WATCH_POST, "col": 25, "row": 21},
-            {"type": StructureType.WATCH_POST, "col": 35, "row": 21},
-            # Courier Zone internal barriers.
-            {"type": StructureType.BARRIER, "col": 32, "row": 8},
-            {"type": StructureType.BARRIER, "col": 35, "row": 10},
+            # ── Checkpoints: perpendicular to the doorway flow axis ─────────────
+            # hub ↔ analyst_bay (E/W flow at col 6-7) → checkpoint runs N/S (orientation E)
+            {"type": StructureType.CHECKPOINT, "col": 5,  "row": 3, "orientation": "E"},
+            # hub ↔ guardian_fortress (N/S flow at row 10-11) → checkpoint runs E/W (orientation N)
+            {"type": StructureType.CHECKPOINT, "col": 3,  "row": 9, "orientation": "N"},
+            # analyst_bay ↔ courier_zone (E/W flow at col 18-19) → orientation E
+            {"type": StructureType.CHECKPOINT, "col": 17, "row": 3, "orientation": "E"},
+            # analyst_bay ↔ quarantine_block (N/S flow at row 5-6) → orientation N
+            {"type": StructureType.CHECKPOINT, "col": 14, "row": 4, "orientation": "N"},
+            # quarantine_block ↔ guardian_fortress (N/S flow at row 10-11) → orientation N
+            {"type": StructureType.CHECKPOINT, "col": 14, "row": 12, "orientation": "N"},
+            # courier_zone ↔ quarantine_block (N/S flow at row 6-7) → orientation N
+            {"type": StructureType.CHECKPOINT, "col": 20, "row": 5, "orientation": "N"},
+
+            # ── Watch posts: one per zone, facing toward zone interior ───────────
+            {"type": StructureType.WATCH_POST, "col": 2,  "row": 5,  "orientation": "E"},  # hub (west side facing E)
+            {"type": StructureType.WATCH_POST, "col": 12, "row": 2,  "orientation": "S"},  # analyst_bay (north, facing S)
+            {"type": StructureType.WATCH_POST, "col": 24, "row": 4,  "orientation": "W"},  # courier_zone (east, facing W)
+            {"type": StructureType.WATCH_POST, "col": 15, "row": 8,  "orientation": "N"},  # quarantine (south, facing N)
+            {"type": StructureType.WATCH_POST, "col": 14, "row": 14, "orientation": "N"},  # guardian (near quarantine entrance, facing N)
+
+            # ── Zone border barriers (flanking doorways, not blocking them) ──────
+            {"type": StructureType.BARRIER, "col": 5,  "row": 2, "orientation": "N"},   # hub/analyst border north
+            {"type": StructureType.BARRIER, "col": 5,  "row": 5, "orientation": "N"},   # hub/analyst border south
+            {"type": StructureType.BARRIER, "col": 17, "row": 1, "orientation": "N"},   # analyst/courier border
+            {"type": StructureType.BARRIER, "col": 21, "row": 1, "orientation": "N"},   # courier inner
+
+            # ── Zone special structures ──────────────────────────────────────────
+            # Corruption beacon in courier zone (radially symmetric, N fine)
+            {"type": StructureType.CORRUPTION_BEACON, "col": 23, "row": 3, "orientation": "N"},
+            # Scan relay post in guardian fortress (facing quarantine border)
+            {"type": StructureType.SCAN_RELAY_POST,   "col": 8,  "row": 14, "orientation": "N"},
+            # Quarantine walls flanking the quarantine_block interior
+            {"type": StructureType.QUARANTINE_WALL, "col": 13, "row": 7,  "orientation": "E"},
+            {"type": StructureType.QUARANTINE_WALL, "col": 17, "row": 7,  "orientation": "E"},
+            {"type": StructureType.QUARANTINE_WALL, "col": 13, "row": 9,  "orientation": "E"},
+            {"type": StructureType.QUARANTINE_WALL, "col": 17, "row": 9,  "orientation": "E"},
+            # Gate at main quarantine entrance from guardian
+            {"type": StructureType.GATE, "col": 15, "row": 12, "orientation": "N"},
         ]
 
         for spec in defaults:
