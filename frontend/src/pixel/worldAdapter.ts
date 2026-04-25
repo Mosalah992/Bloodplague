@@ -1,6 +1,7 @@
 import type { WorldState } from './world/worldState.js';
 import type { SpeechBubblePool } from './world/speechBubble.js';
 import { applyContaminationEvent } from './world/infectionOverlay.js';
+import { invalidateDecorCache } from './world/worldDecorLayer.js';
 import { WORLD_COLS, WORLD_ROWS } from './constants.js';
 
 interface SpatialResponse {
@@ -553,6 +554,7 @@ export class WorldAdapter {
         hp: Number(s.hp ?? 1),
         orientation: (['N','E','S','W'].includes(String(s.orientation ?? 'N')) ? s.orientation : 'N') as 'N'|'E'|'S'|'W',
       })));
+      invalidateDecorCache();
     } catch (err) {
       logFetchFailure('/api/world/structures', err);
     }
