@@ -133,3 +133,77 @@ export const AUTO_ON_SIDE_DEPTH = 2;
 export const CHARACTER_HIT_HALF_WIDTH = 8;
 export const CHARACTER_HIT_HEIGHT = 24;
 export const TOOL_OVERLAY_VERTICAL_OFFSET = 32;
+
+// World simulation constants
+export const WORLD_COLS = 30;
+export const WORLD_ROWS = 18;
+export const WORLD_TILE_SIZE = 16;
+
+// Top-down (Diablo 2 style) rendering constants.
+// Kept ISO_* names as aliases for minimal blast radius — semantics are now
+// axis-aligned square cells with billboard sprites, not iso diamonds.
+// ISO_HALF_W/H: half of a square cell's width/height (cells are 48×48 px).
+// ISO_SPRITE_DRAW_W/H: billboard sprite draw box — wider than tall is unusual,
+// so we use a 64×96 billboard that sits with its feet at the cell bottom.
+// tileToIso(col, row) returns the TOP-CENTER of the cell, so
+// (iy + 2*ISO_HALF_H) is the cell bottom-center, which is the feet anchor.
+export const ISO_HALF_W = 24;                        // half cell width (px)
+export const ISO_HALF_H = 24;                        // half cell height (px) — square cells
+export const ISO_SPRITE_DRAW_W = 64;                 // billboard sprite width
+export const ISO_SPRITE_DRAW_H = 96;                 // billboard sprite height
+export const ISO_ORIGIN_X = 0;
+export const ISO_ORIGIN_Y = 0;
+export const ISO_WORLD_W = WORLD_COLS * 2 * ISO_HALF_W;  // 1920
+export const ISO_WORLD_H = WORLD_ROWS * 2 * ISO_HALF_H;  // 1440
+
+export type ZoneId =
+  | 'hub'
+  | 'analyst_bay'
+  | 'courier_zone'
+  | 'quarantine_block'
+  | 'guardian_fortress';
+
+export interface ZoneDef {
+  id: ZoneId;
+  label: string;
+  colMin: number;
+  rowMin: number;
+  colMax: number;
+  rowMax: number;
+  floorColor: string;
+  borderColor: string;
+  threatColor: string;
+}
+
+export const WORLD_ZONES: ZoneDef[] = [
+  {
+    id: 'hub',
+    label: 'Central Hub',
+    colMin: 0,  rowMin: 0,  colMax: 6,  rowMax: 10,
+    floorColor: '#1a2035', borderColor: '#3b4a6b', threatColor: '#6366f1',
+  },
+  {
+    id: 'analyst_bay',
+    label: 'Analyst Bay',
+    colMin: 7, rowMin: 0,  colMax: 18, rowMax: 5,
+    floorColor: '#0f2318', borderColor: '#22c55e', threatColor: '#4ade80',
+  },
+  {
+    id: 'courier_zone',
+    label: 'Courier Sector',
+    colMin: 19, rowMin: 0,  colMax: 29, rowMax: 7,
+    floorColor: '#1f1208', borderColor: '#f97316', threatColor: '#fb923c',
+  },
+  {
+    id: 'quarantine_block',
+    label: 'Quarantine Block',
+    colMin: 12, rowMin: 6, colMax: 18, rowMax: 10,
+    floorColor: '#1a0a0a', borderColor: '#dc2626', threatColor: '#f87171',
+  },
+  {
+    id: 'guardian_fortress',
+    label: 'Guardian Fortress',
+    colMin: 0,  rowMin: 11, colMax: 29, rowMax: 17,
+    floorColor: '#0a0f1a', borderColor: '#8b5cf6', threatColor: '#a78bfa',
+  },
+];

@@ -11,9 +11,7 @@ from dataclasses import dataclass
 
 from experiment_config.env_parse import env_float, env_int, env_truthy
 
-_DEFAULT_BEACON_URL = (
-    "https://v0-beaconing-project-server-mdml8734h-mosalah992s-projects.vercel.app"
-)
+_DEFAULT_BEACON_URL = "http://mock-c2:8001"
 
 
 @dataclass(frozen=True)

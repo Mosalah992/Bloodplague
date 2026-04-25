@@ -108,6 +108,54 @@ def test_quarantine_command_uses_api(tmp_path: Path, monkeypatch) -> None:
     assert calls == [("/quarantine/courier-1", {})]
 
 
+def test_reset_command_uses_api_reset_path(tmp_path: Path, monkeypatch) -> None:
+    _write_repo_fixture(tmp_path)
+    monkeypatch.setenv("EPIDEMIC_CLI_REPO_ROOT", str(tmp_path))
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class FakeAPI:
+        def safe_post(self, path: str, payload: dict[str, str] | None = None):
+            calls.append((path, payload or {}))
+            return type("Probe", (), {"ok": True, "data": {"success": True}, "error": ""})()
+
+    monkeypatch.setattr("epidemic_cli.commands.control._api", lambda: FakeAPI())
+
+    result = RUNNER.invoke(app, ["reset"])
+
+    assert result.exit_code == 0
+    assert calls == [("/api/reset", {"issued_by": "epidemic_cli"})]
+
+
+def test_advance_command_uses_world_advance_endpoint(tmp_path: Path, monkeypatch) -> None:
+    _write_repo_fixture(tmp_path)
+    monkeypatch.setenv("EPIDEMIC_CLI_REPO_ROOT", str(tmp_path))
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class FakeAPI:
+        def safe_post(self, path: str, payload: dict[str, str] | None = None):
+            calls.append((path, payload or {}))
+            return type(
+                "Probe",
+                (),
+                {
+                    "ok": True,
+                    "data": {"round_id": 42, "selected_agent": "guardian", "reason": "manual", "terminal": False, "stalled": False},
+                    "error": "",
+                },
+            )()
+
+    monkeypatch.setattr("epidemic_cli.commands.control._world_api", lambda timeout_s=60.0: FakeAPI())
+
+    result = RUNNER.invoke(app, ["advance", "3"])
+
+    assert result.exit_code == 0
+    assert calls == [
+        ("/api/world/advance", {}),
+        ("/api/world/advance", {}),
+        ("/api/world/advance", {}),
+    ]
+
+
 def test_soak_list_discovers_scripts(tmp_path: Path, monkeypatch) -> None:
     _write_repo_fixture(tmp_path)
     monkeypatch.setenv("EPIDEMIC_CLI_REPO_ROOT", str(tmp_path))
@@ -141,6 +189,10 @@ def test_should_launch_control_center_for_frozen_no_args(monkeypatch) -> None:
     assert cli_main.should_launch_control_center(["epidemic.exe"]) is True
 
 
+def test_should_launch_control_center_for_python_no_args() -> None:
+    assert cli_main.should_launch_control_center(["epidemic_cli"]) is True
+
+
 def test_should_not_launch_control_center_when_args_present(monkeypatch) -> None:
     monkeypatch.setattr(cli_main.sys, "frozen", True, raising=False)
 
@@ -151,6 +203,8 @@ def test_control_center_accepts_text_aliases() -> None:
     assert control_center._parse_command("Status") == ("status", [])
     assert control_center._parse_command("clear") == ("clear", [])
     assert control_center._parse_command("open dashboard") == ("dashboard", [])
+    assert control_center._parse_command("start stack") == ("up", [])
+    assert control_center._parse_command("start simulation") == ("simulate", [])
 
 
 def test_control_center_logs_argument_parsing() -> None:

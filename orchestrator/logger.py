@@ -22,12 +22,19 @@ class EventLogger:
     - Index on event_type and timestamp for faster queries
     """
 
+    # Default 100 MB; override via JSONL_MAX_SIZE_MB env var.
+    _DEFAULT_MAX_MB = 100
+
     def __init__(self, db_path="/app/logs/epidemic.db", jsonl_path="/app/logs/events.jsonl"):
         self.db_path = db_path
         self.jsonl_path = jsonl_path
         self._conn: sqlite3.Connection | None = None
         self._write_lock = threading.Lock()
         self._degraded_jsonl_only: bool = False
+        try:
+            self._max_jsonl_bytes = int(os.environ.get("JSONL_MAX_SIZE_MB", self._DEFAULT_MAX_MB)) * 1024 * 1024
+        except (ValueError, TypeError):
+            self._max_jsonl_bytes = self._DEFAULT_MAX_MB * 1024 * 1024
         self._degraded_reason: str = ""
         self._init_db()
         self._bootstrap_integrity_deferred = not self._env_truthy("TELEMETRY_BOOTSTRAP_INTEGRITY", "1")
@@ -186,6 +193,7 @@ class EventLogger:
                     handle.write(json_line)
                     handle.flush()
                     os.fsync(handle.fileno())
+                self._maybe_rotate_jsonl()
                 return
             jsonl_size_before = os.path.getsize(jsonl_path) if os.path.exists(jsonl_path) else 0
             jsonl_written = False
@@ -214,6 +222,7 @@ class EventLogger:
                     os.fsync(handle.fileno())
                 jsonl_written = True
                 conn.commit()
+                self._maybe_rotate_jsonl()
             except Exception:
                 conn.rollback()
                 if jsonl_written:
@@ -223,6 +232,21 @@ class EventLogger:
                     except OSError:
                         pass
                 raise
+
+    def _maybe_rotate_jsonl(self) -> None:
+        """Rotate the JSONL file if it exceeds the size cap. Caller must hold _write_lock."""
+        try:
+            size = os.path.getsize(self.jsonl_path)
+        except OSError:
+            return
+        if size < self._max_jsonl_bytes:
+            return
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        archive = self.jsonl_path[:-6] + f"_{ts}.jsonl" if self.jsonl_path.endswith(".jsonl") else self.jsonl_path + f"_{ts}"
+        try:
+            os.replace(self.jsonl_path, archive)
+        except OSError:
+            pass  # Best-effort: if rename fails, keep appending to the existing file
 
     def close(self):
         """Close the persistent connection cleanly."""

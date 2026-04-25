@@ -1,0 +1,30 @@
+{
+  "character": {
+    "id": "3cbbe6e0-9095-4440-a9c3-3990295c7ef9",
+    "name": "The Void-Tentacle Entity \u2014 Detailed Description  It does not have a true body. Not in the way your mind expects.  At its center is a rupture in space, a tear that looks less like a hole and more like reality forgetting how to behave. Light bends toward it, not smoothly, but in jagged, stuttering distortions, like a corrupted video struggling to render existence.  From this absence, the tentacles emerge.  They are not uniform. Some are impossibly thin, like strands of black hair drifting underwater. Others are massive, thicker than tree trunks, coiling with slow, deliberate intention. Their surfaces shift constantly, alternating between:  matte, light-devouring black slick, reflective textures like oil on water faintly translucent layers revealing moving shapes inside that don\u2019t match the tentacle\u2019s motion  No two segments behave the same. Geometry breaks along their length. Angles appear where curves should be. Some sections seem to exist a second out of sync with the rest.  \ud83e\udde0 Texture & Surface Detail  Up close, the skin is wrong.  It pulses subtly, as if breathing, but not in rhythm. Vein-like structures flicker beneath the surface, glowing dimly in hues that don\u2019t have names. Occasionally, the flesh splits\u2014not into wounds, but into eye-like apertures that open briefly, observe, and then seal seamlessly.  Suction cups, where they exist, are not consistent:  Some resemble human mouths, frozen mid-whisper Others are smooth voids that absorb light completely A few twitch independently, reacting to stimuli before the creature itself does \ud83c\udf0c Movement  It doesn\u2019t move through space.  Space seems to rearrange itself around it.  When a tentacle extends, it doesn\u2019t travel point A \u2192 point B. Instead, it appears at B while still existing at A, stretching reality like a thought being pulled apart. Watching it too long creates a sense of vertigo, like your brain is buffering.  Smaller tendrils drift constantly, tasting the environment. They react not just to physical contact, but to:  attention sound even the direction someone is thinking in \ud83d\udd0a Sound Design (if you\u2019re using this for a project)  It does not roar.  It emits layered, almost subliminal noise:  low-frequency vibrations felt more than heard reversed whispers overlapping each other wet, organic shifting mixed with digital distortion artifacts  Sometimes, the sound cuts out completely when it\u2019s near\u2026 like your world has been muted.",
+    "prompt": "The Void-Tentacle Entity \u2014 Detailed Description  It does not have a true body. Not in the way your mind expects.  At its center is a rupture in space, a tear that looks less like a hole and more like reality forgetting how to behave. Light bends toward it, not smoothly, but in jagged, stuttering distortions, like a corrupted video struggling to render existence.  From this absence, the tentacles emerge.  They are not uniform. Some are impossibly thin, like strands of black hair drifting underwater. Others are massive, thicker than tree trunks, coiling with slow, deliberate intention. Their surfaces shift constantly, alternating between:  matte, light-devouring black slick, reflective textures like oil on water faintly translucent layers revealing moving shapes inside that don\u2019t match the tentacle\u2019s motion  No two segments behave the same. Geometry breaks along their length. Angles appear where curves should be. Some sections seem to exist a second out of sync with the rest.  \ud83e\udde0 Texture & Surface Detail  Up close, the skin is wrong.  It pulses subtly, as if breathing, but not in rhythm. Vein-like structures flicker beneath the surface, glowing dimly in hues that don\u2019t have names. Occasionally, the flesh splits\u2014not into wounds, but into eye-like apertures that open briefly, observe, and then seal seamlessly.  Suction cups, where they exist, are not consistent:  Some resemble human mouths, frozen mid-whisper Others are smooth voids that absorb light completely A few twitch independently, reacting to stimuli before the creature itself does \ud83c\udf0c Movement  It doesn\u2019t move through space.  Space seems to rearrange itself around it.  When a tentacle extends, it doesn\u2019t travel point A \u2192 point B. Instead, it appears at B while still existing at A, stretching reality like a thought being pulled apart. Watching it too long creates a sense of vertigo, like your brain is buffering.  Smaller tendrils drift constantly, tasting the environment. They react not just to physical contact, but to:  attention sound even the direction someone is thinking in \ud83d\udd0a Sound Design (if you\u2019re using this for a project)  It does not roar.  It emits layered, almost subliminal noise:  low-frequency vibrations felt more than heard reversed whispers overlapping each other wet, organic shifting mixed with digital distortion artifacts  Sometimes, the sound cuts out completely when it\u2019s near\u2026 like your world has been muted.",
+    "size": {
+      "width": 68,
+      "height": 68
+    },
+    "template_id": "bear",
+    "directions": 8,
+    "view": "low top-down",
+    "created_at": "2026-04-12T18:05:01.039871+00:00"
+  },
+  "frames": {
+    "rotations": {
+      "south": "rotations/south.png",
+      "south-east": "rotations/south-east.png",
+      "east": "rotations/east.png",
+      "north-east": "rotations/north-east.png",
+      "north": "rotations/north.png",
+      "north-west": "rotations/north-west.png",
+      "west": "rotations/west.png",
+      "south-west": "rotations/south-west.png"
+    },
+    "animations": {}
+  },
+  "export_version": "2.0",
+  "export_date": "2026-04-12T18:07:55.265415"
+}

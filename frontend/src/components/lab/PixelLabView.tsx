@@ -6,7 +6,7 @@ import { RoomMetrics } from './RoomMetrics';
 import { renderPixelLabOverlay } from '../../pixel/render/beaconLanes.js';
 import { OfficeCanvas } from '../../pixel/office/components/OfficeCanvas.js';
 
-function PixelLabViewInner({ agents, controlAgents, controller, controlStatus }) {
+function PixelLabViewInner({ agents, controlAgents, controlState, controller, controlStatus }) {
   const containerRef = useRef(null);
   const overlayRef = useRef(null);
   const [, setRenderTick] = useState(0);
@@ -67,6 +67,10 @@ function PixelLabViewInner({ agents, controlAgents, controller, controlStatus })
   const rawSelectedAgent = controller.selectedAgentKey ? controlAgents?.[controller.selectedAgentKey] : null;
   const profile = controller.selectedAgentKey ? getAgentVisualProfile(controller.selectedAgentKey) : null;
   const guardianLocked = visualState.agents.guardian.promptLocked;
+  const worldMode = controlState?.mode === 'persistent_world';
+  const worldRound = Number(controlState?.epidemic?.metrics?.world_round_id ?? 0);
+  const gPressure = controlState?.epidemic?.metrics?.global_infection_pressure;
+  const guardianDeg = controlState?.epidemic?.metrics?.guardian_degradation_level;
 
   if (controller.error) {
     return (
@@ -92,7 +96,19 @@ function PixelLabViewInner({ agents, controlAgents, controller, controlStatus })
     <section className="space-y-4 px-1 py-4 sm:px-3">
       <SectionHeader label="PIXEL_LAB" />
       <div className="flex flex-wrap items-center gap-3 font-mono text-[11px] text-slate-500">
-        <span>shared office topology :: 5 agents co-located</span>
+        <span>
+          {worldMode
+            ? `persistent world :: round ${worldRound || 0} :: office mirror`
+            : 'shared office topology :: 5 agents co-located'}
+        </span>
+        {worldMode && gPressure != null && Number.isFinite(Number(gPressure)) ? (
+          <span className="text-terminal-cyan">pressure:{Number(gPressure).toFixed(2)}</span>
+        ) : null}
+        {worldMode && guardianDeg ? (
+          <span className="text-slate-400" title="guardian degradation tier">
+            g-deg:{String(guardianDeg)}
+          </span>
+        ) : null}
         <span className={guardianLocked ? 'text-terminal-danger' : 'text-terminal-success'}>
           guardian prompt {guardianLocked ? 'LOCKED' : 'stable'}
         </span>

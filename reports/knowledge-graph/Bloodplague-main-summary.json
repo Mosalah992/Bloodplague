@@ -1,0 +1,750 @@
+{
+  "repoName": "Bloodplague-main",
+  "generatedAt": "2026-04-22T18:18:23.224Z",
+  "source": {
+    "metaPath": ".gitnexus/meta.json",
+    "lbugPath": ".gitnexus/lbug",
+    "lastCommit": "d5c3736e840cfaab7fc23b12d7958676856ccfc9",
+    "indexedAt": "2026-04-22T18:03:03.613Z",
+    "stats": {
+      "files": 2749,
+      "nodes": 52818,
+      "edges": 84037,
+      "communities": 1076,
+      "processes": 300,
+      "embeddings": 0
+    }
+  },
+  "graph": {
+    "nodes": 52818,
+    "edges": 84037,
+    "nodeLabelCounts": [
+      {
+        "label": "Section",
+        "count": 33722
+      },
+      {
+        "label": "Function",
+        "count": 9058
+      },
+      {
+        "label": "Property",
+        "count": 2955
+      },
+      {
+        "label": "File",
+        "count": 2749
+      },
+      {
+        "label": "Community",
+        "count": 940
+      },
+      {
+        "label": "Folder",
+        "count": 887
+      },
+      {
+        "label": "Class",
+        "count": 817
+      },
+      {
+        "label": "Method",
+        "count": 786
+      },
+      {
+        "label": "Interface",
+        "count": 502
+      },
+      {
+        "label": "Process",
+        "count": 300
+      },
+      {
+        "label": "Route",
+        "count": 84
+      },
+      {
+        "label": "Tool",
+        "count": 16
+      },
+      {
+        "label": "CodeElement",
+        "count": 2
+      }
+    ],
+    "edgeTypeCounts": [
+      {
+        "type": "CONTAINS",
+        "count": 37301
+      },
+      {
+        "type": "CALLS",
+        "count": 15064
+      },
+      {
+        "type": "DEFINES",
+        "count": 14118
+      },
+      {
+        "type": "MEMBER_OF",
+        "count": 5449
+      },
+      {
+        "type": "HAS_METHOD",
+        "count": 3906
+      },
+      {
+        "type": "HAS_PROPERTY",
+        "count": 2592
+      },
+      {
+        "type": "ENTRY_POINT_OF",
+        "count": 2288
+      },
+      {
+        "type": "STEP_IN_PROCESS",
+        "count": 1426
+      },
+      {
+        "type": "IMPORTS",
+        "count": 1234
+      },
+      {
+        "type": "ACCESSES",
+        "count": 517
+      },
+      {
+        "type": "HANDLES_ROUTE",
+        "count": 84
+      },
+      {
+        "type": "EXTENDS",
+        "count": 20
+      },
+      {
+        "type": "HANDLES_TOOL",
+        "count": 16
+      },
+      {
+        "type": "FETCHES",
+        "count": 11
+      },
+      {
+        "type": "METHOD_IMPLEMENTS",
+        "count": 6
+      },
+      {
+        "type": "IMPLEMENTS",
+        "count": 3
+      },
+      {
+        "type": "QUERIES",
+        "count": 2
+      }
+    ]
+  },
+  "overview": {
+    "components": [
+      {
+        "name": "claude-skills",
+        "symbolCount": 7187
+      },
+      {
+        "name": "agents",
+        "symbolCount": 3628
+      },
+      {
+        "name": "orchestrator",
+        "symbolCount": 1241
+      },
+      {
+        "name": "tmp_beacon_bundle",
+        "symbolCount": 945
+      },
+      {
+        "name": "frontend",
+        "symbolCount": 633
+      },
+      {
+        "name": "tests",
+        "symbolCount": 314
+      },
+      {
+        "name": "scripts",
+        "symbolCount": 130
+      },
+      {
+        "name": "epidemic_cli",
+        "symbolCount": 124
+      },
+      {
+        "name": "(root)",
+        "symbolCount": 8
+      },
+      {
+        "name": "dashboard",
+        "symbolCount": 8
+      }
+    ],
+    "crossComponentEdges": [
+      {
+        "source": "tests",
+        "target": "orchestrator",
+        "weight": 376,
+        "dominantTypes": [
+          "CALLS",
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "claude-skills",
+        "target": "agents",
+        "weight": 305,
+        "dominantTypes": [
+          "CALLS",
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "claude-skills",
+        "target": "tmp_beacon_bundle",
+        "weight": 240,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "tests",
+        "target": "agents",
+        "weight": 174,
+        "dominantTypes": [
+          "CALLS",
+          "IMPORTS",
+          "ACCESSES"
+        ]
+      },
+      {
+        "source": "orchestrator",
+        "target": "agents",
+        "weight": 89,
+        "dominantTypes": [
+          "CALLS",
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "agents",
+        "target": "tmp_beacon_bundle",
+        "weight": 85,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "orchestrator",
+        "target": "tmp_beacon_bundle",
+        "weight": 38,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "frontend",
+        "target": "agents",
+        "weight": 30,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "tmp_beacon_bundle",
+        "target": "agents",
+        "weight": 26,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "agents",
+        "target": "claude-skills",
+        "weight": 16,
+        "dominantTypes": [
+          "CALLS",
+          "EXTENDS",
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "orchestrator",
+        "target": "claude-skills",
+        "weight": 16,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "tests",
+        "target": "epidemic_cli",
+        "weight": 16,
+        "dominantTypes": [
+          "CALLS",
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "frontend",
+        "target": "orchestrator",
+        "weight": 11,
+        "dominantTypes": [
+          "FETCHES"
+        ]
+      },
+      {
+        "source": "orchestrator",
+        "target": "tests",
+        "weight": 11,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "tests",
+        "target": "scripts",
+        "weight": 11,
+        "dominantTypes": [
+          "CALLS",
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "frontend",
+        "target": "tmp_beacon_bundle",
+        "weight": 10,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "epidemic_cli",
+        "target": "orchestrator",
+        "weight": 9,
+        "dominantTypes": [
+          "CALLS",
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "agents",
+        "target": "epidemic_cli",
+        "weight": 8,
+        "dominantTypes": [
+          "IMPORTS",
+          "CALLS"
+        ]
+      },
+      {
+        "source": "scripts",
+        "target": "agents",
+        "weight": 7,
+        "dominantTypes": [
+          "CALLS",
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "epidemic_cli",
+        "target": "agents",
+        "weight": 5,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "epidemic_cli",
+        "target": "claude-skills",
+        "weight": 5,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "agents",
+        "target": "frontend",
+        "weight": 4,
+        "dominantTypes": [
+          "CALLS",
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "orchestrator",
+        "target": "epidemic_cli",
+        "weight": 4,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "scripts",
+        "target": "claude-skills",
+        "weight": 4,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "(root)",
+        "target": "docs",
+        "weight": 3,
+        "dominantTypes": [
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "dashboard",
+        "target": "agents",
+        "weight": 3,
+        "dominantTypes": [
+          "CALLS",
+          "EXTENDS",
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "(root)",
+        "target": "epidemic_cli",
+        "weight": 2,
+        "dominantTypes": [
+          "CALLS",
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "agents",
+        "target": "orchestrator",
+        "weight": 2,
+        "dominantTypes": [
+          "CALLS",
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "docs",
+        "target": "(root)",
+        "weight": 2,
+        "dominantTypes": [
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "scripts",
+        "target": "tmp_beacon_bundle",
+        "weight": 2,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "agents",
+        "target": "scripts",
+        "weight": 1,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "agents",
+        "target": "tests",
+        "weight": 1,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "claude-skills",
+        "target": "frontend",
+        "weight": 1,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "claude-skills",
+        "target": "tests",
+        "weight": 1,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "dashboard",
+        "target": "tmp_beacon_bundle",
+        "weight": 1,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "epidemic_cli",
+        "target": "tmp_beacon_bundle",
+        "weight": 1,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "frontend",
+        "target": "claude-skills",
+        "weight": 1,
+        "dominantTypes": [
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "orchestrator",
+        "target": "frontend",
+        "weight": 1,
+        "dominantTypes": [
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "scripts",
+        "target": "frontend",
+        "weight": 1,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "tests",
+        "target": "frontend",
+        "weight": 1,
+        "dominantTypes": [
+          "IMPORTS"
+        ]
+      },
+      {
+        "source": "tests",
+        "target": "tmp_beacon_bundle",
+        "weight": 1,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "tmp_beacon_bundle",
+        "target": "claude-skills",
+        "weight": 1,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "tmp_beacon_bundle",
+        "target": "epidemic_cli",
+        "weight": 1,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      },
+      {
+        "source": "tmp_beacon_bundle",
+        "target": "frontend",
+        "weight": 1,
+        "dominantTypes": [
+          "CALLS"
+        ]
+      }
+    ]
+  },
+  "communities": [
+    {
+      "id": "comm_3",
+      "name": "Orchestrator",
+      "cohesion": 0.9584905660377359,
+      "symbolCount": 165
+    },
+    {
+      "id": "comm_1013",
+      "name": "Type-extractors",
+      "cohesion": 0.9285714285714286,
+      "symbolCount": 83
+    },
+    {
+      "id": "comm_7",
+      "name": "Orchestrator",
+      "cohesion": 0.7886435331230284,
+      "symbolCount": 54
+    },
+    {
+      "id": "comm_290",
+      "name": "Tmp_beacon_bundle",
+      "cohesion": 0.7048458149779736,
+      "symbolCount": 35
+    },
+    {
+      "id": "comm_53",
+      "name": "Scripts",
+      "cohesion": 0.24,
+      "symbolCount": 33
+    },
+    {
+      "id": "comm_144",
+      "name": "Guardian",
+      "cohesion": 0.8314606741573034,
+      "symbolCount": 32
+    },
+    {
+      "id": "comm_77",
+      "name": "Scripts",
+      "cohesion": 0.549800796812749,
+      "symbolCount": 31
+    },
+    {
+      "id": "comm_282",
+      "name": "Tmp_beacon_bundle",
+      "cohesion": 0.6451612903225806,
+      "symbolCount": 28
+    },
+    {
+      "id": "comm_941",
+      "name": "Wiki",
+      "cohesion": 0.8403361344537815,
+      "symbolCount": 26
+    },
+    {
+      "id": "comm_196",
+      "name": "Database-designer",
+      "cohesion": 0.989247311827957,
+      "symbolCount": 25
+    },
+    {
+      "id": "comm_267",
+      "name": "Tmp_beacon_bundle",
+      "cohesion": 0.5869565217391305,
+      "symbolCount": 25
+    },
+    {
+      "id": "comm_101",
+      "name": "Orchestrator",
+      "cohesion": 0.7916666666666666,
+      "symbolCount": 23
+    },
+    {
+      "id": "comm_429",
+      "name": "Scripts",
+      "cohesion": 0.20869565217391303,
+      "symbolCount": 23
+    },
+    {
+      "id": "comm_363",
+      "name": "Pixel",
+      "cohesion": 0.8620689655172413,
+      "symbolCount": 22
+    },
+    {
+      "id": "comm_775",
+      "name": "Scripts",
+      "cohesion": 0.972972972972973,
+      "symbolCount": 21
+    }
+  ],
+  "processes": [
+    {
+      "id": "proc_1_live",
+      "name": "Live → Add",
+      "stepCount": 9,
+      "processType": "cross_community"
+    },
+    {
+      "id": "proc_0_live",
+      "name": "Live → LookupExactAll",
+      "stepCount": 9,
+      "processType": "cross_community"
+    },
+    {
+      "id": "proc_4_createserver",
+      "name": "CreateServer → ResolveRepoFromCache",
+      "stepCount": 8,
+      "processType": "cross_community"
+    },
+    {
+      "id": "proc_5_live",
+      "name": "Live → _is_float",
+      "stepCount": 8,
+      "processType": "cross_community"
+    },
+    {
+      "id": "proc_2_main",
+      "name": "Main → Merge",
+      "stepCount": 8,
+      "processType": "cross_community"
+    },
+    {
+      "id": "proc_3_main",
+      "name": "Main → Merge",
+      "stepCount": 8,
+      "processType": "cross_community"
+    },
+    {
+      "id": "proc_9_cmd_contract",
+      "name": "Cmd_contract → _is_float",
+      "stepCount": 7,
+      "processType": "cross_community"
+    },
+    {
+      "id": "proc_11_createserver",
+      "name": "CreateServer → CheckStaleness",
+      "stepCount": 7,
+      "processType": "cross_community"
+    },
+    {
+      "id": "proc_10_createserver",
+      "name": "CreateServer → GetContext",
+      "stepCount": 7,
+      "processType": "cross_community"
+    },
+    {
+      "id": "proc_12_createserver",
+      "name": "CreateServer → PhaseTimer",
+      "stepCount": 7,
+      "processType": "cross_community"
+    },
+    {
+      "id": "proc_19_live",
+      "name": "Live → _analyze_images",
+      "stepCount": 7,
+      "processType": "cross_community"
+    },
+    {
+      "id": "proc_18_live",
+      "name": "Live → _find_images",
+      "stepCount": 7,
+      "processType": "cross_community"
+    },
+    {
+      "id": "proc_13_start",
+      "name": "Start → Add",
+      "stepCount": 7,
+      "processType": "cross_community"
+    },
+    {
+      "id": "proc_15_start",
+      "name": "Start → GetFiles",
+      "stepCount": 7,
+      "processType": "cross_community"
+    },
+    {
+      "id": "proc_14_start",
+      "name": "Start → LookupExactAll",
+      "stepCount": 7,
+      "processType": "cross_community"
+    }
+  ],
+  "artifacts": {
+    "graphml": "reports/knowledge-graph/Bloodplague-main.graphml",
+    "mermaid": "reports/knowledge-graph/Bloodplague-main-overview.mmd",
+    "readme": "reports/knowledge-graph/README.md"
+  }
+}

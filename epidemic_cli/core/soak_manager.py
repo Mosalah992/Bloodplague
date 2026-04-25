@@ -58,6 +58,7 @@ def active_soak_state() -> dict[str, Any]:
     state = load_state()
     pid = int(state.get("pid") or 0)
     if not pid or not process_alive(pid):
+        clear_state()
         return {}
     return state
 
@@ -124,8 +125,16 @@ def stop_soak() -> dict[str, Any]:
 
 
 def latest_soak_snapshot(root: Path | None = None) -> dict[str, Any]:
+    state = active_soak_state()
+    progress = latest_progress(root)
+    if not state and progress:
+        progress = {
+            **progress,
+            "status": "stale" if str(progress.get("status") or "") == "running" else progress.get("status", ""),
+            "note": "process_not_alive",
+        }
     return {
-        "state": active_soak_state() or load_state(),
-        "progress": latest_progress(root),
+        "state": state,
+        "progress": progress,
         "report_path": str(latest_report_path(root) or ""),
     }

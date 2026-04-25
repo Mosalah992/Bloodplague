@@ -15,7 +15,9 @@ from types import ModuleType
 
 def _load_shared_kill_chain() -> ModuleType:
     candidate_paths = [
-        # In-container: /app/shared/kill_chain.py (mounted by orchestrator Dockerfile)
+        # In-container packaged layout: /app/shared/kill_chain.py
+        Path(__file__).resolve().parents[1] / "shared" / "kill_chain.py",
+        # Legacy in-container layout: /app/orchestrator/shared/kill_chain.py
         Path(__file__).resolve().parent / "shared" / "kill_chain.py",
         # Legacy in-container shim (kept for backward compatibility)
         Path(__file__).with_name("shared_kill_chain.py"),

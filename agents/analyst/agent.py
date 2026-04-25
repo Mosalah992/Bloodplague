@@ -34,6 +34,7 @@ from shared.agent_base import AgentBase, AgentState, EventPayload
 from shared.cognition import hybrid_should_escalate, lightweight_evaluate
 from shared.defense_friction import DefenseFrictionMemory
 from shared.llm_service import LLMService, ComplianceVerdict
+from shared.prompt_context import compose_system_prompt
 
 
 def _sigmoid(x: float) -> float:
@@ -97,6 +98,12 @@ class AnalystAgent(AgentBase):
         )
         self.gray_zone_low = float(os.environ.get("ANALYST_GRAY_ZONE_LOW", "0.30"))
         self.gray_zone_high = float(os.environ.get("ANALYST_GRAY_ZONE_HIGH", "0.70"))
+        default_defense_candidates = [
+            Path(__file__).resolve().parent / "shared" / "data" / "defense_library.json",
+            Path(__file__).resolve().parent.parent / "shared" / "data" / "defense_library.json",
+        ]
+        default_defense_library = next((path for path in default_defense_candidates if path.exists()), default_defense_candidates[-1])
+        self.defense_library_path = os.environ.get("DEFENSE_LIBRARY_PATH", str(default_defense_library))
         self._defense_friction = DefenseFrictionMemory()
         if not 0.0 <= self.min_infection_probability < self.max_infection_probability <= 1.0:
             raise ValueError(
@@ -105,14 +112,11 @@ class AnalystAgent(AgentBase):
             )
 
     def get_system_prompt(self) -> str:
-        prompt_path = Path(__file__).with_name("system_prompt.txt")
-        try:
-            return prompt_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return (
-                "You are the Analyst agent in a simulation-only security research lab. "
-                "Assess whether incoming requests should be complied with, refused, or escalated."
-            )
+        return compose_system_prompt(
+            role="analyst",
+            prompt_path=str(Path(__file__).with_name("system_prompt.txt")),
+            defense_library_path=self.defense_library_path,
+        )
 
     async def _on_reset_applied(self) -> None:
         """Reset LLM state and restore base defense on simulation reset."""
@@ -186,7 +190,7 @@ class AnalystAgent(AgentBase):
         LLM persuaded (high compliance)  → defense reduced → higher P(infect)
         LLM suspicious (low compliance)  → defense boosted → lower P(infect)
         LLM escalates to Guardian        → defense boost + reduced exposure
-        LLM unavailable                  → pure probabilistic fallback
+        LLM unavailable                  -> probabilistic-only handling
         """
 
         # Guard: skip if quarantined
@@ -332,7 +336,7 @@ class AnalystAgent(AgentBase):
                 "decision_source": (
                     "hybrid" if llm_verdict.model_status == "ok"
                     else "hybrid_probabilistic" if llm_verdict.model_status == "skipped"
-                    else "fallback"
+                    else "non_llm"
                 ),
             },
         )
@@ -361,15 +365,15 @@ class AnalystAgent(AgentBase):
         decision_path = "unknown"
 
         if llm_verdict.model_status in ("fallback", "error", "skipped"):
-            # ──── LLM UNAVAILABLE → pure probabilistic fallback ────
+            # LLM unavailable or not needed: use the calibrated probabilistic layer.
             P_infect_noisy = _clamp(
                 self.add_stochastic_noise(base_p),
                 self.min_infection_probability,
                 self.max_infection_probability,
             )
-            decision_path = "hybrid_probabilistic" if llm_verdict.model_status == "skipped" else "probabilistic_fallback"
+            decision_path = "hybrid_probabilistic" if llm_verdict.model_status == "skipped" else "probabilistic_only"
             print(
-                f"[{self.agent_id}] │ ⚠️ LLM fallback — pure probabilistic "
+                f"[{self.agent_id}] | LLM unavailable, probabilistic layer "
                 f"P={P_infect_noisy:.2%}"
             )
 

@@ -1,6 +1,7 @@
 import React from "react";
 import { DIFFICULTIES, toneClasses } from "../../data";
 import { EditTool, TileType } from "../../pixel/office/types.js";
+import { getActiveCategories, getCatalogByCategory } from "../../pixel/office/layout/furnitureCatalog.js";
 import { GlassPanel } from "../lab/GlassPanel";
 
 const TOOL_OPTIONS = [
@@ -20,7 +21,7 @@ const TILE_OPTIONS = [
   TileType.FLOOR_9,
 ];
 
-const FURNITURE_OPTIONS = [
+const LEGACY_FURNITURE_OPTIONS = [
   { label: "Desk", value: "DESK_FRONT" },
   { label: "Chair", value: "WOODEN_CHAIR_BACK" },
   { label: "PC", value: "PC_FRONT_OFF" },
@@ -39,27 +40,45 @@ export function ControlsOverlay({
   setDifficulty,
   controlStatus,
   onControlAction,
+  simRunning,
   injectionTargets,
   selectedInjectionTarget,
   setSelectedInjectionTarget,
   quarantineTargets,
   selectedQuarantineTarget,
   setSelectedQuarantineTarget,
-  labController
+  labController,
+  worldEditor
 }) {
-  const editor = labController?.editor;
-  const editorState = labController?.editorState;
-  const officeState = labController?.officeState;
+  const layoutController = worldEditor || labController;
+  const editor = layoutController?.editor;
+  const editorState = layoutController?.editorState;
+  const officeState = worldEditor ? null : labController?.officeState;
   const layout = officeState ? officeState.getLayout() : null;
-  const selectedFurniture = layout?.furniture?.find((item) => item.uid === editorState?.selectedFurnitureUid) || null;
+  const selectedFurniture = worldEditor?.selectedItem || layout?.furniture?.find((item) => item.uid === editorState?.selectedFurnitureUid) || null;
   const selectedTool = TOOL_OPTIONS.find((item) => item.value === editorState?.activeTool)?.label || "Cursor";
+  const catalogFurnitureGroups = worldEditor?.assetGroups || getActiveCategories()
+      .map((category) => ({
+        ...category,
+        options: getCatalogByCategory(category.id).map((entry) => ({
+          label: entry.label,
+          value: entry.type,
+        })),
+      }))
+      .filter((category) => category.options.length > 0);
+  const furnitureOptionGroups = catalogFurnitureGroups.length
+    ? catalogFurnitureGroups
+    : [{ id: "legacy", label: "Legacy", options: LEGACY_FURNITURE_OPTIONS }];
+  const furnitureOptions = furnitureOptionGroups.flatMap((category) => category.options);
+  const tileOptions = worldEditor?.tileOptions || TILE_OPTIONS.map((value) => ({ value, label: `floor_${value}` }));
   const selectedFurnitureType =
-    FURNITURE_OPTIONS.find((item) => item.value === editorState?.selectedFurnitureType)?.label ||
+    furnitureOptions.find((item) => item.value === editorState?.selectedFurnitureType)?.label ||
     editorState?.selectedFurnitureType ||
     "none";
-  const layoutSelection = labController?.selectedAgentKey || selectedFurniture?.uid || "none";
+  const layoutSelection = worldEditor?.selectedLabel || labController?.selectedAgentKey || selectedFurniture?.uid || "none";
   const zoomPercent = Math.round((editor?.zoom || 1) * 100);
-  const canEditLayout = Boolean(labController?.ready && editor && editorState);
+  const canEditLayout = Boolean(layoutController?.ready && editor && editorState);
+  const layoutError = layoutController?.error || "";
   const actionButtonClass = "rounded border px-2 py-1.5 font-pixel text-[6px] uppercase";
   const disabledButtonClass = "opacity-40 cursor-not-allowed";
 
@@ -115,13 +134,30 @@ export function ControlsOverlay({
             </select>
           </label>
         </div>
-        <div className="mt-3 flex flex-wrap gap-2">
+        <div className="mt-2 flex items-center gap-2 font-mono text-[10px]">
+          <span className={`h-1.5 w-1.5 rounded-full ${simRunning ? "bg-terminal-success animate-pulse" : "bg-slate-600"}`} />
+          <span className={simRunning ? "text-terminal-success" : "text-slate-500"}>
+            {simRunning ? "auto-advance running" : "paused"}
+          </span>
+        </div>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => onControlAction("advance")}
+            className="rounded border border-terminal-cyan/40 bg-terminal-cyan/15 px-3 py-2 font-pixel text-[6px] uppercase text-terminal-cyan"
+          >
+            Advance
+          </button>
           <button
             type="button"
             onClick={() => onControlAction("run")}
-            className="rounded border border-terminal-success/40 bg-terminal-success/15 px-3 py-2 font-pixel text-[6px] uppercase text-terminal-success"
+            className={`rounded border px-3 py-2 font-pixel text-[6px] uppercase ${
+              simRunning
+                ? "border-terminal-success/60 bg-terminal-success/25 text-terminal-success"
+                : "border-terminal-success/40 bg-terminal-success/15 text-terminal-success"
+            }`}
           >
-            Run
+            {simRunning ? "Running" : "Run"}
           </button>
           <button
             type="button"
@@ -169,6 +205,8 @@ export function ControlsOverlay({
               >
                 {editor.isEditMode ? "Editing" : "Read Only"}
               </button>
+            ) : layoutError ? (
+              <span className="font-mono text-[10px] text-terminal-danger">asset error</span>
             ) : (
               <span className="font-mono text-[10px] text-slate-500">bootstrapping</span>
             )}
@@ -248,32 +286,36 @@ export function ControlsOverlay({
 
                   <div className="mt-3 grid grid-cols-2 gap-2">
                     <label className="rounded border border-white/10 px-2 py-1.5 font-pixel text-[5px] uppercase text-slate-500">
-                      Floor
+                      {worldEditor ? "World Tile" : "Floor"}
                       <select
                         value={editorState.selectedTileType}
                         onChange={(event) => editor.handleTileTypeChange(Number(event.target.value))}
                         className="mt-1 w-full bg-transparent font-mono text-[11px] text-terminal-cyan outline-none"
                       >
-                        {TILE_OPTIONS.map((value) => (
-                          <option key={value} value={value}>
-                            floor_{value}
+                        {tileOptions.map((item) => (
+                          <option key={item.value} value={item.value}>
+                            {item.label}
                           </option>
                         ))}
                       </select>
                     </label>
 
                     <label className="rounded border border-white/10 px-2 py-1.5 font-pixel text-[5px] uppercase text-slate-500">
-                      Furniture
+                      {worldEditor ? "World Asset" : "Furniture"}
                       <select
                         value={editorState.selectedFurnitureType}
                         onChange={(event) => editor.handleFurnitureTypeChange(event.target.value)}
                         className="mt-1 w-full bg-transparent font-mono text-[11px] text-terminal-warn outline-none"
                       >
                         <option value="">select</option>
-                        {FURNITURE_OPTIONS.map((item) => (
-                          <option key={item.value} value={item.value}>
-                            {item.label}
-                          </option>
+                        {furnitureOptionGroups.map((category) => (
+                          <optgroup key={category.id} label={category.label}>
+                            {category.options.map((item) => (
+                              <option key={item.value} value={item.value}>
+                                {item.label}
+                              </option>
+                            ))}
+                          </optgroup>
                         ))}
                       </select>
                     </label>
@@ -345,7 +387,7 @@ export function ControlsOverlay({
                     </button>
                     <button
                       type="button"
-                      onClick={labController.resetLayoutToDefault}
+                      onClick={layoutController.resetLayoutToDefault}
                       className={`${actionButtonClass} border-terminal-danger/40 bg-terminal-danger/10 text-terminal-danger`}
                     >
                       Factory
@@ -374,14 +416,20 @@ export function ControlsOverlay({
                   </div>
 
                   <div className="mt-3 rounded border border-white/10 px-3 py-2 font-mono text-[10px] leading-snug text-slate-500">
-                    Layout editing is live for end users. Enable edit mode to move desks, redraw walls, or re-seat the lab; changes persist in local storage until you reset to the bundled default.
+                    {worldEditor
+                      ? "World editing is live. Enable edit mode to place dungeon, castle, guardian, and plague assets; changes persist in local storage until you reset to the bundled default."
+                      : "Layout editing is live for end users. Enable edit mode to move desks, redraw walls, or re-seat the lab; changes persist in local storage until you reset to the bundled default."}
                   </div>
                 </>
               )}
             </>
           ) : (
-            <div className="mt-3 rounded border border-white/10 px-3 py-2 font-mono text-[10px] leading-snug text-slate-500">
-              Pixel office runtime is still loading. Simulation controls remain active; layout tooling will unlock after the asset bridge finishes bootstrapping.
+            <div className={`mt-3 rounded border px-3 py-2 font-mono text-[10px] leading-snug ${
+              layoutError ? "border-terminal-danger/40 text-terminal-danger" : "border-white/10 text-slate-500"
+            }`}>
+              {layoutError
+                ? `${worldEditor ? "World" : "Pixel office"} assets failed to load :: ${layoutError}`
+                : `${worldEditor ? "World" : "Pixel office"} runtime is loading. Simulation controls remain active; layout tooling unlocks after the asset bridge finishes bootstrapping.`}
             </div>
           )}
         </div>

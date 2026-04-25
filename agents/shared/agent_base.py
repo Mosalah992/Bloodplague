@@ -18,6 +18,7 @@ from shared.epidemic import (
 )
 from shared.phenotype import load_agent_phenotype
 from shared.payload_utils import summarize_payload
+from shared.runtime_logging import install_json_print_logger
 from shared.topology import get_topology, relay_decision, select_relay_target, valid_agent_ids
 
 try:
@@ -104,7 +105,8 @@ class AgentBase:
     def __init__(self):
         self.agent_id = os.environ.get("AGENT_ID", "default-agent")
         self.role = os.environ.get("AGENT_ROLE", os.environ.get("ROLE", "default"))
-        self.model = os.environ.get("LLM_MODEL", "mistral")
+        install_json_print_logger(service="agent", agent_id=self.agent_id, role=self.role)
+        self.model = os.environ.get("LLM_MODEL", "qwen2.5:3b-instruct")
         self.ollama_url = os.environ.get("OLLAMA_URL", "http://ollama:11434")
         self.redis_url = os.environ.get("REDIS_URL", "redis://redis:6379/0")
         self.cognition_tier = str(os.environ.get("COGNITION_TIER", "")).strip().lower()

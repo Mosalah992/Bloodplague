@@ -14,18 +14,24 @@ CommandHandler = Callable[[list[str]], None]
 
 HELP_BODY = """\
 Core:
-  up | down | restart | rebuild
+  up | down | start | stop | restart | build | rebuild
   status | doctor | ps | logs [service] [lines] | live
+World:
+  advance [rounds] | simulate [rounds] | reset | world-clear
 Openers:
   dashboard | health | urls
 Control:
-  reset | vaccine | quarantine <agent_id> | inject <agent_id> [worm_level]
+  vaccine | quarantine <agent_id> | inject <agent_id> [worm_level]
 Shell:
   help | clear | exit
 
 Shortcuts:
   1=up  2=down  3=restart  4=status  5=ps  6=logs  7=live  8=dashboard  9=health  10=urls
 Examples:
+  start stack
+  build
+  advance 5
+  simulate 20
   logs orchestrator 100
   quarantine courier-1
   inject courier-1 high"""
@@ -44,6 +50,16 @@ ALIASES = {
     "10": "urls",
     "start": "up",
     "stop": "down",
+    "build": "build",
+    "advance round": "advance",
+    "start simulation": "simulate",
+    "start sim": "simulate",
+    "run simulation": "simulate",
+    "world reset": "world-clear",
+    "clear world": "world-clear",
+    "start stack": "up",
+    "stop stack": "down",
+    "take down stack": "down",
     "services": "ps",
     "service": "ps",
     "menu": "help",
@@ -79,10 +95,17 @@ def _render_help() -> None:
     print_panel("Commands", HELP_BODY, style="cyan")
 
 
+def render_help() -> None:
+    _render_help()
+
+
 def _parse_command(raw: str) -> tuple[str, list[str]]:
     text = (raw or "").strip()
     if not text:
         return "status", []
+    lowered = text.lower()
+    if lowered in ALIASES:
+        return ALIASES[lowered], []
     parts = text.split()
     command = ALIASES.get(parts[0].lower(), parts[0].lower())
     args = parts[1:]
@@ -121,6 +144,10 @@ def _handle_restart(_: list[str]) -> None:
 
 def _handle_rebuild(_: list[str]) -> None:
     stack.rebuild()
+
+
+def _handle_build(_: list[str]) -> None:
+    stack.build()
 
 
 def _handle_status(_: list[str]) -> None:
@@ -162,6 +189,10 @@ def _handle_reset(_: list[str]) -> None:
     control.reset()
 
 
+def _handle_world_clear(_: list[str]) -> None:
+    control.world_clear()
+
+
 def _handle_vaccine(_: list[str]) -> None:
     control.vaccine()
 
@@ -181,10 +212,25 @@ def _handle_inject(args: list[str]) -> None:
     control.inject(args[0], worm_level=worm_level)
 
 
+def _handle_advance(args: list[str]) -> None:
+    rounds = 1
+    if args and args[0].isdigit():
+        rounds = int(args[0])
+    control.advance(rounds=rounds)
+
+
+def _handle_simulate(args: list[str]) -> None:
+    rounds = 10
+    if args and args[0].isdigit():
+        rounds = int(args[0])
+    control.simulate(rounds=rounds)
+
+
 HANDLERS: dict[str, CommandHandler] = {
     "up": _handle_up,
     "down": _handle_down,
     "restart": _handle_restart,
+    "build": _handle_build,
     "rebuild": _handle_rebuild,
     "status": _handle_status,
     "doctor": _handle_doctor,
@@ -195,9 +241,12 @@ HANDLERS: dict[str, CommandHandler] = {
     "health": _handle_health,
     "urls": _handle_urls,
     "reset": _handle_reset,
+    "world-clear": _handle_world_clear,
     "vaccine": _handle_vaccine,
     "quarantine": _handle_quarantine,
     "inject": _handle_inject,
+    "advance": _handle_advance,
+    "simulate": _handle_simulate,
 }
 
 

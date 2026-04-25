@@ -75,8 +75,19 @@ interface DashboardAgentState {
   c2_lifecycle_state?: string;
 }
 
-interface DashboardState {
+export interface WorldEpidemicMetrics {
+  guardian_degradation_level?: string;
+  global_infection_pressure?: number;
+  guardian_pressure_score?: number;
+  world_round_id?: number;
+}
+
+export interface DashboardState {
+  mode?: string;
   agents?: Record<string, DashboardAgentState & Record<string, unknown>>;
+  epidemic?: {
+    metrics?: WorldEpidemicMetrics & Record<string, unknown>;
+  };
 }
 
 interface StoredSeatAssignment {
@@ -101,6 +112,9 @@ interface LiveEvent {
   payloadHash?: string;
   parentPayloadHash?: string;
   strainId?: string;
+  strainFamily?: string;
+  strain_family?: string;
+  semanticFamily?: string;
   strainBranchingRecommended?: boolean;
   mutationType?: string;
   mutationVersion?: string | number;
@@ -326,6 +340,14 @@ export class EpidemicAdapter {
         this.officeState.removeAgent(spec.numericId);
       }
     }
+
+    const metrics = controlState.epidemic?.metrics;
+    const gdl = String(metrics?.guardian_degradation_level ?? '').trim();
+    const degraded =
+      gdl.length > 0 && !/^G0(?:_HEALTHY)?$/i.test(gdl) && gdl.toUpperCase() !== 'G0';
+    const now = performance.now();
+    const ransomActive = now < this.visualState.officeFx.ransomUntil;
+    this.visualState.agents.guardian.promptLocked = degraded || ransomActive;
   }
 
   private processEvent(event: LiveEvent): void {
@@ -422,6 +444,21 @@ export class EpidemicAdapter {
       }
     }
 
+    if (type.includes('WORLD_MESSAGE')) {
+      if (srcKey && dstKey) {
+        this.pushLane(srcKey, dstKey, '#38bdf8', 950, 1.85);
+      }
+      if (srcKey) {
+        this.visualState.agents[srcKey].pulseUntil = now + PULSE_MS;
+      }
+      const intent = String(event.attackType || event.attack_type || '').toUpperCase();
+      if (intent && (intent.includes('RELAY') || intent.includes('INJECT') || intent.includes('PRESSURE'))) {
+        if (dstKey) {
+          this.visualState.agents[dstKey].defendUntil = now + DEFEND_MS * 0.55;
+        }
+      }
+    }
+
     const branchParent = srcKey || dstKey;
     const shouldBranch =
       Boolean(event.strainBranchingRecommended) ||
@@ -503,9 +540,6 @@ export class EpidemicAdapter {
     const state = this.visualState.agents[key];
     state.epidemicState = epidemicState;
     state.infected = true;
-    if (key === 'guardian') {
-      state.promptLocked = false;
-    }
   }
 
   private applyRansomSuccess(): void {

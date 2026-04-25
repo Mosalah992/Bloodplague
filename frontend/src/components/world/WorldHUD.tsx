@@ -12,6 +12,9 @@ interface HUDProps {
   globalPressure: number;
   roundId: number;
   alerts: string[];
+  orchestratorLine?: string;
+  debugMode: boolean;
+  onToggleDebug: (val: boolean) => void;
 }
 
 const DEGRADATION_COLORS: Record<string, string> = {
@@ -23,13 +26,34 @@ const DEGRADATION_COLORS: Record<string, string> = {
   G5_FAILED:      '#7f1d1d',
 };
 
-export default function WorldHUD({ zoneStatuses, guardianDegradation, globalPressure, roundId, alerts }: HUDProps) {
+export default function WorldHUD({ 
+  zoneStatuses, 
+  guardianDegradation, 
+  globalPressure, 
+  roundId, 
+  alerts, 
+  orchestratorLine,
+  debugMode,
+  onToggleDebug
+}: HUDProps) {
   return (
+    <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
     <div style={{
       position: 'absolute', top: 0, left: 0, right: 0,
-      pointerEvents: 'none', padding: '12px',
+      padding: '12px',
       display: 'flex', gap: '12px', alignItems: 'flex-start',
     }}>
+      <div style={{
+        background: '#06060ecc', border: '1px solid #1e293b', borderRadius: 6,
+        padding: '8px 12px', backdropFilter: 'blur(4px)', pointerEvents: 'all',
+        cursor: 'pointer',
+      }} onClick={() => onToggleDebug(!debugMode)}>
+        <div style={{ color: '#94a3b8', fontSize: 10, marginBottom: 2, fontFamily: 'monospace' }}>MODE</div>
+        <div style={{ color: debugMode ? '#ef4444' : '#38bdf8', fontSize: 11, fontFamily: 'monospace', fontWeight: 'bold' }}>
+          {debugMode ? 'OMNISCIENT TELEMETRY' : 'SIMULATION LAYER'}
+        </div>
+      </div>
+
       <div style={{
         background: '#06060ecc', border: '1px solid #1e293b', borderRadius: 6,
         padding: '8px 12px', backdropFilter: 'blur(4px)',
@@ -85,11 +109,36 @@ export default function WorldHUD({ zoneStatuses, guardianDegradation, globalPres
         }}>
           {alerts.slice(-3).map((a, i) => (
             <div key={i} style={{ color: '#fca5a5', fontSize: 9, fontFamily: 'monospace', marginBottom: 2 }}>
-              ⚠ {a}
+              ! {a}
             </div>
           ))}
         </div>
       )}
+    </div>
+
+    {orchestratorLine && (
+      <div style={{
+        position: 'absolute', bottom: 0, left: 0, right: 0,
+        padding: '0 12px 10px',
+        display: 'flex', justifyContent: 'center',
+      }}>
+        <div style={{
+          background: '#06060eee', border: '1px solid #0ea5e9',
+          borderRadius: 4, padding: '5px 14px',
+          display: 'flex', alignItems: 'center', gap: 8,
+          backdropFilter: 'blur(6px)', maxWidth: 640,
+        }}>
+          <span style={{
+            color: '#38bdf8', fontSize: 9, fontFamily: 'monospace',
+            fontWeight: 'bold', letterSpacing: 1, flexShrink: 0,
+          }}>ORC</span>
+          <span style={{
+            color: '#cbd5e1', fontSize: 10, fontFamily: 'monospace',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>{orchestratorLine}</span>
+        </div>
+      </div>
+    )}
     </div>
   );
 }

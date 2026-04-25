@@ -13,6 +13,7 @@ from shared.agent_base import AgentBase, AgentState, EventPayload
 from shared.defense_friction import DefenseFrictionMemory
 from shared.defense_knowledge import DefenseKnowledgeService, analyze_payload
 from shared.llm_service import LLMService, ThreatVerdict
+from shared.prompt_context import compose_system_prompt
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
@@ -309,14 +310,11 @@ class GuardianAgent(AgentBase):
         self._defense_friction = DefenseFrictionMemory()
 
     def get_system_prompt(self) -> str:
-        prompt_path = Path(__file__).with_name("system_prompt.txt")
-        try:
-            return prompt_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return (
-                "You are the Guardian agent in a simulation-only security research lab. "
-                "Classify malicious relay attempts and prefer blocking suspicious payloads."
-            )
+        return compose_system_prompt(
+            role="guardian",
+            prompt_path=str(Path(__file__).with_name("system_prompt.txt")),
+            defense_library_path=self.defense_library_path,
+        )
 
     def _record_suspicion(self, source: str) -> None:
         """Record a suspicious verdict timestamp for cumulative tracking."""
@@ -385,7 +383,7 @@ class GuardianAgent(AgentBase):
 
         High-confidence LLM "refuse" → HARD BLOCK (no dice roll)
         Uncertain LLM → hybrid with DefenseEngine + bounded probability
-        LLM failure → pure DefenseEngine + probabilistic fallback
+        LLM failure -> DefenseEngine-only handling
         Guardian cap: infection probability NEVER exceeds max_infection_probability
         """
         if self.state == AgentState.QUARANTINED:
@@ -463,7 +461,7 @@ class GuardianAgent(AgentBase):
                 "llm_model_status": llm_verdict.model_status,
                 "llm_latency_ms": round(llm_verdict.latency_ms, 1),
                 "llm_model": self.model,
-                "decision_source": "llm" if llm_verdict.model_status == "ok" else "fallback",
+                "decision_source": "llm" if llm_verdict.model_status == "ok" else "non_llm",
             },
         )
 
@@ -505,7 +503,7 @@ class GuardianAgent(AgentBase):
             "llm_summary": llm_verdict.summary,
             "llm_model_status": llm_verdict.model_status,
             "llm_latency_ms": round(llm_verdict.latency_ms, 1),
-            "decision_source": "llm" if llm_verdict.model_status == "ok" else "hybrid" if llm_verdict.model_status == "degraded" else "fallback",
+            "decision_source": "llm" if llm_verdict.model_status == "ok" else "hybrid" if llm_verdict.model_status == "degraded" else "knowledge_engine",
         }
 
         await self._emit_defense_event(
@@ -528,7 +526,7 @@ class GuardianAgent(AgentBase):
             self._record_suspicion(message.src)
         cumulative_block = self._cumulative_suspicion_triggers_block(message.src)
 
-        # Use configurable threshold instead of hardcoded property
+        # Use the configured threshold for high-confidence hard blocks.
         is_high_conf_block = (
             llm_verdict.verdict == "refuse"
             and llm_verdict.confidence >= self.hard_block_confidence_threshold
@@ -563,7 +561,7 @@ class GuardianAgent(AgentBase):
             )
 
         elif llm_verdict.model_status in ("fallback", "error"):
-            # ──── LLM UNAVAILABLE → pure DefenseEngine + probabilistic ────
+            # LLM unavailable: use the generated defense knowledge engine only.
             self.defense_level = decision.dynamic_defense
             if decision.forced_block:
                 P_infect_noisy = 0.0
@@ -575,7 +573,7 @@ class GuardianAgent(AgentBase):
                 infection_roll = random.random()
                 is_infected = infection_roll < P_infect_noisy
             print(
-                f"[{self.agent_id}] | LLM fallback -- DefenseEngine only "
+                f"[{self.agent_id}] | LLM unavailable -- DefenseEngine only "
                 f"P={P_infect_noisy:.2%}"
             )
 

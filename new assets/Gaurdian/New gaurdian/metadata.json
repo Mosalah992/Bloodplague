@@ -1,0 +1,30 @@
+{
+  "character": {
+    "id": "e1a4eeb0-3d2c-443f-b1a1-8cafd6224153",
+    "name": "a glowing gaurdian hacker that operates multiple monitors and defending against multiple attack attempts ,with a an orange aura like Quen from the witcher 3 ",
+    "prompt": "a glowing gaurdian hacker that operates multiple monitors and defending against multiple attack attempts ,with a an orange aura like Quen from the witcher 3 ",
+    "size": {
+      "width": 68,
+      "height": 68
+    },
+    "template_id": "mannequin",
+    "directions": 8,
+    "view": "low top-down",
+    "created_at": "2026-04-12T17:47:05.893908+00:00"
+  },
+  "frames": {
+    "rotations": {
+      "south": "rotations/south.png",
+      "south-east": "rotations/south-east.png",
+      "east": "rotations/east.png",
+      "north-east": "rotations/north-east.png",
+      "north": "rotations/north.png",
+      "north-west": "rotations/north-west.png",
+      "west": "rotations/west.png",
+      "south-west": "rotations/south-west.png"
+    },
+    "animations": {}
+  },
+  "export_version": "2.0",
+  "export_date": "2026-04-12T17:49:00.582731"
+}

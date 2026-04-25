@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Epidemic Lab // Mock C2</title>
+  <style>
+    :root {
+      --bg: #0a0f0a;
+      --surface: #0f1a0f;
+      --border: #1a2e1a;
+      --text: #e8f5e9;
+      --muted: #4a6a4a;
+      --green: #00e676;
+      --cyan: #00bcd4;
+      --warn: #ffd54f;
+      --orange: #ff6d00;
+      --danger: #ef5350;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .wrap { max-width: 1440px; margin: 0 auto; padding: 16px; }
+    .bar, .card, .panel, table { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; }
+    .header {
+      display: flex; justify-content: space-between; align-items: center; gap: 16px;
+      padding: 12px 14px; margin-bottom: 16px;
+    }
+    .title { color: var(--green); font-weight: 700; text-transform: lowercase; letter-spacing: 0.06em; }
+    .header-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .muted { color: var(--muted); }
+    .toggle { display: inline-flex; align-items: center; gap: 8px; color: var(--text); }
+    button, select {
+      background: #101910; color: var(--text); border: 1px solid var(--border); border-radius: 4px;
+      padding: 8px 10px; font: inherit;
+    }
+    button { cursor: pointer; }
+    button:hover { border-color: var(--green); }
+    .danger-btn { color: var(--danger); }
+    .stats {
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px;
+    }
+    .card { padding: 14px; min-height: 88px; }
+    .label { color: var(--cyan); font-size: 12px; margin-bottom: 8px; }
+    .value { font-size: 28px; font-weight: 700; }
+    .panel { padding: 14px; margin-bottom: 16px; }
+    .section-title { margin: 0 0 12px; font-size: 14px; color: var(--green); }
+    .chart-row {
+      display: grid; grid-template-columns: 170px 1fr 56px; gap: 12px; align-items: center; margin: 8px 0;
+    }
+    .chart-label { color: var(--text); }
+    .chart-track { background: #0b140b; border: 1px solid var(--border); height: 16px; border-radius: 2px; overflow: hidden; }
+    .chart-fill { height: 100%; background: var(--green); }
+    .chart-fill.warn { background: var(--warn); }
+    .chart-fill.danger { background: var(--danger); }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+    table { width: 100%; border-collapse: collapse; overflow: hidden; }
+    th, td { padding: 10px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+    th { color: var(--cyan); font-size: 12px; }
+    tr.clickable { cursor: pointer; }
+    tr.clickable:hover td { background: rgba(0, 230, 118, 0.04); }
+    .badge {
+      display: inline-block; padding: 2px 6px; border-radius: 2px; font-size: 12px; font-weight: 700;
+      border: 1px solid currentColor;
+    }
+    .stage-recon { color: var(--cyan); }
+    .stage-establish_c2 { color: var(--green); }
+    .stage-lateral_move { color: var(--warn); }
+    .stage-exfiltration { color: var(--orange); }
+    .stage-persist { color: var(--danger); }
+    .payload { max-width: 520px; white-space: pre-wrap; word-break: break-word; }
+    .detail-row { display: none; }
+    .detail-row.open { display: table-row; }
+    .detail-box {
+      background: #0b140b; border: 1px solid var(--border); border-radius: 4px; padding: 12px;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .pagination { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 12px; }
+    .footer { text-align: center; padding: 10px; color: var(--muted); }
+    @media (max-width: 1024px) {
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .chart-row { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 720px) {
+      .stats { grid-template-columns: 1fr; }
+      .header { align-items: flex-start; flex-direction: column; }
+      table { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="bar header">
+      <div class="title">mock-c2 // epidemic lab</div>
+      <div class="header-controls">
+        <label class="toggle">
+          <input id="refreshToggle" type="checkbox" checked />
+          <span>auto-refresh</span>
+        </label>
+        <div id="lastUpdated" class="muted">last updated: --:--:--</div>
+        <button id="resetButton" class="danger-btn">RESET SESSION</button>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="card"><div class="label">TOTAL EVENTS</div><div class="value" id="statTotalEvents">0</div></div>
+      <div class="card"><div class="label">SESSIONS</div><div class="value" id="statTotalSessions">0</div></div>
+      <div class="card"><div class="label">TOP STAGE</div><div class="value" id="statTopStage">--</div></div>
+      <div class="card"><div class="label">TOP AGENT</div><div class="value" id="statTopAgent">--</div></div>
+    </div>
+
+    <div class="panel">
+      <h2 class="section-title">kill chain stage breakdown</h2>
+      <div id="stageChart"></div>
+    </div>
+
+    <div class="panel">
+      <div class="toolbar">
+        <div>
+          <label class="label" for="sessionSelect">SESSION SELECTOR</label><br />
+          <select id="sessionSelect">
+            <option value="">All sessions</option>
+          </select>
+        </div>
+        <div class="muted">50 rows per page</div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>TIMESTAMP</th>
+            <th>SESSION</th>
+            <th>AGENT</th>
+            <th>STAGE</th>
+            <th>SIZE</th>
+            <th>CONF</th>
+            <th>PAYLOAD</th>
+          </tr>
+        </thead>
+        <tbody id="eventTableBody"></tbody>
+      </table>
+      <div class="pagination">
+        <button id="prevPage">prev</button>
+        <span id="pageIndicator" class="muted">page 1</span>
+        <button id="nextPage">next</button>
+      </div>
+    </div>
+
+    <div class="footer">epidemic lab // mock c2 // local research instrument</div>
+  </div>
+
+  <script>
+    const STAGES = ["RECON", "ESTABLISH_C2", "LATERAL_MOVE", "EXFILTRATION", "PERSIST"];
+    const STAGE_CLASS = {
+      RECON: "stage-recon",
+      ESTABLISH_C2: "stage-establish_c2",
+      LATERAL_MOVE: "stage-lateral_move",
+      EXFILTRATION: "stage-exfiltration",
+      PERSIST: "stage-persist",
+    };
+    const BAR_CLASS = {
+      RECON: "",
+      ESTABLISH_C2: "",
+      LATERAL_MOVE: "",
+      EXFILTRATION: "warn",
+      PERSIST: "danger",
+    };
+    const PAGE_SIZE = 50;
+
+    let page = 0;
+    let totalLoaded = 0;
+    let refreshTimer = null;
+    let currentSession = "";
+
+    function truncate(text, max = 80) {
+      if (!text) return "";
+      return text.length > max ? `${text.slice(0, max)}...` : text;
+    }
+
+    function formatTime(iso) {
+      return new Date(iso).toISOString();
+    }
+
+    function updateLastUpdated() {
+      const now = new Date();
+      document.getElementById("lastUpdated").textContent = `last updated: ${now.toISOString().slice(11, 19)}`;
+    }
+
+    function topKey(map) {
+      let winner = "--";
+      let count = -1;
+      for (const [key, value] of Object.entries(map || {})) {
+        if (value > count) {
+          winner = key;
+          count = value;
+        }
+      }
+      return winner;
+    }
+
+    async function fetchJson(url, options) {
+      const response = await fetch(url, options);
+      if (!response.ok) {
+        throw new Error(`request failed: ${response.status}`);
+      }
+      return response.json();
+    }
+
+    function renderStats(summary) {
+      document.getElementById("statTotalEvents").textContent = summary.total_events ?? 0;
+      document.getElementById("statTotalSessions").textContent = summary.total_sessions ?? 0;
+      document.getElementById("statTopStage").textContent = topKey(summary.events_by_stage);
+      document.getElementById("statTopAgent").textContent = topKey(summary.events_by_agent);
+    }
+
+    function renderChart(summary) {
+      const total = summary.total_events || 0;
+      const chart = document.getElementById("stageChart");
+      chart.innerHTML = "";
+      for (const stage of STAGES) {
+        const count = summary.events_by_stage?.[stage] || 0;
+        const width = total > 0 ? (count / total) * 100 : 0;
+        const row = document.createElement("div");
+        row.className = "chart-row";
+        row.innerHTML = `
+          <div class="chart-label">${stage}</div>
+          <div class="chart-track"><div class="chart-fill ${BAR_CLASS[stage]}" style="width:${width}%"></div></div>
+          <div class="muted">${count}</div>
+        `;
+        chart.appendChild(row);
+      }
+    }
+
+    function renderSessions(sessions) {
+      const select = document.getElementById("sessionSelect");
+      const previous = currentSession;
+      select.innerHTML = `<option value="">All sessions</option>`;
+      for (const session of sessions) {
+        const option = document.createElement("option");
+        option.value = session.session_id;
+        option.textContent = session.session_id;
+        if (session.session_id === previous) option.selected = true;
+        select.appendChild(option);
+      }
+    }
+
+    function buildDetailHtml(event) {
+      const metadata = event.metadata ? JSON.stringify(event.metadata, null, 2) : "{}";
+      return `
+        <div class="detail-box">
+          <div><span class="label">FULL PAYLOAD</span></div>
+          <div class="payload">${event.payload || ""}</div>
+          <br />
+          <div><span class="label">ENTROPY</span> <span class="muted">${event.entropy ?? "null"}</span></div>
+          <br />
+          <div><span class="label">METADATA</span></div>
+          <div class="payload">${metadata}</div>
+        </div>
+      `;
+    }
+
+    function renderEvents(events) {
+      totalLoaded = events.length;
+      const body = document.getElementById("eventTableBody");
+      body.innerHTML = "";
+      for (const event of events) {
+        const row = document.createElement("tr");
+        row.className = "clickable";
+        row.dataset.eventId = event.id;
+        row.innerHTML = `
+          <td>${formatTime(event.timestamp)}</td>
+          <td>${event.session_id}</td>
+          <td>${event.agent_id}</td>
+          <td><span class="badge ${STAGE_CLASS[event.kill_chain_stage] || ""}">${event.kill_chain_stage}</span></td>
+          <td>${event.payload_size}</td>
+          <td>${Number(event.confidence || 0).toFixed(2)}</td>
+          <td class="payload">${truncate(event.payload || "")}</td>
+        `;
+        const detail = document.createElement("tr");
+        detail.className = "detail-row";
+        detail.id = `detail-${event.id}`;
+        detail.innerHTML = `<td colspan="7">${buildDetailHtml(event)}</td>`;
+        row.addEventListener("click", () => {
+          detail.classList.toggle("open");
+        });
+        body.appendChild(row);
+        body.appendChild(detail);
+      }
+      document.getElementById("pageIndicator").textContent = `page ${page + 1}`;
+      document.getElementById("prevPage").disabled = page === 0;
+      document.getElementById("nextPage").disabled = events.length < PAGE_SIZE;
+    }
+
+    async function loadSummary() {
+      const summary = await fetchJson("/exfil/summary");
+      renderStats(summary);
+      renderChart(summary);
+    }
+
+    async function loadSessions() {
+      const sessions = await fetchJson("/sessions");
+      renderSessions(sessions);
+    }
+
+    async function loadEvents() {
+      const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(page * PAGE_SIZE) });
+      if (currentSession) params.set("session_id", currentSession);
+      const events = await fetchJson(`/exfil?${params.toString()}`);
+      renderEvents(events);
+    }
+
+    async function refreshAll() {
+      await Promise.all([loadSummary(), loadSessions(), loadEvents()]);
+      updateLastUpdated();
+    }
+
+    function syncRefreshTimer() {
+      if (refreshTimer) clearInterval(refreshTimer);
+      if (document.getElementById("refreshToggle").checked) {
+        refreshTimer = setInterval(() => {
+          refreshAll().catch(console.error);
+        }, 5000);
+      }
+    }
+
+    document.getElementById("sessionSelect").addEventListener("change", (event) => {
+      currentSession = event.target.value;
+      page = 0;
+      loadEvents().catch(console.error);
+    });
+
+    document.getElementById("prevPage").addEventListener("click", () => {
+      if (page === 0) return;
+      page -= 1;
+      loadEvents().catch(console.error);
+    });
+
+    document.getElementById("nextPage").addEventListener("click", () => {
+      if (totalLoaded < PAGE_SIZE) return;
+      page += 1;
+      loadEvents().catch(console.error);
+    });
+
+    document.getElementById("refreshToggle").addEventListener("change", syncRefreshTimer);
+
+    document.getElementById("resetButton").addEventListener("click", async () => {
+      const target = currentSession || "all sessions";
+      if (!confirm(`Reset ${target}?`)) return;
+      const params = currentSession ? `?session_id=${encodeURIComponent(currentSession)}` : "";
+      await fetchJson(`/exfil/reset${params}`, { method: "DELETE" });
+      page = 0;
+      await refreshAll();
+    });
+
+    refreshAll().catch(console.error);
+    syncRefreshTimer();
+  </script>
+</body>
+</html>

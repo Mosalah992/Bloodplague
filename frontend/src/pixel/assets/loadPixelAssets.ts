@@ -170,6 +170,15 @@ async function decodeFurniture(
 export async function loadPixelAssets(basePath = '/pixel-assets'): Promise<LoadedPixelAssets> {
   const index = await fetchJson<AssetIndex>(joinBase(basePath, 'asset-index.json'));
   const catalog = await fetchJson<CatalogEntry[]>(joinBase(basePath, 'furniture-catalog.json'));
+  if (!Array.isArray(index.characters) || index.characters.length < 5) {
+    throw new Error('Pixel Lab asset-index is incomplete: expected all character sprite sheets.');
+  }
+  if (!Array.isArray(index.floors) || index.floors.length === 0) {
+    throw new Error('Pixel Lab asset-index is incomplete: missing floor tile assets.');
+  }
+  if (!Array.isArray(catalog) || catalog.length === 0) {
+    throw new Error('Pixel Lab furniture catalog is empty.');
+  }
 
   const [characters, floors, walls, furnitureSprites, layout] = await Promise.all([
     decodeCharacters(basePath, index),
@@ -178,6 +187,12 @@ export async function loadPixelAssets(basePath = '/pixel-assets'): Promise<Loade
     decodeFurniture(basePath, catalog),
     fetchJson<OfficeLayout>(joinBase(basePath, index.defaultLayout || 'default-layout.json')),
   ]);
+  if (characters.length !== index.characters.length) {
+    throw new Error('Failed to decode all character sprite sheets for Pixel Lab.');
+  }
+  if (floors.length !== index.floors.length) {
+    throw new Error('Failed to decode all floor sprites for Pixel Lab.');
+  }
 
   setCharacterTemplates(characters);
   setFloorSprites(floors);

@@ -3,29 +3,29 @@ from __future__ import annotations
 import math
 from typing import Any
 
-WORLD_COLS = 80
-WORLD_ROWS = 60
+WORLD_COLS = 30
+WORLD_ROWS = 18
 
 # Zone boundaries: (col_min, row_min, col_max, row_max) — inclusive
 ZONE_BOUNDARIES: dict[str, tuple[int, int, int, int]] = {
-    "courier_zone":      (55, 0,  79, 24),
-    "guardian_fortress": (0,  40, 79, 59),
-    "quarantine_block":  (35, 20, 54, 39),
-    "analyst_bay":       (20, 0,  54, 19),
-    "hub":               (0,  0,  19, 39),
+    "hub":               (0, 0, 6, 10),
+    "analyst_bay":       (7, 0, 18, 5),
+    "courier_zone":      (19, 0, 29, 7),
+    "quarantine_block":  (12, 6, 18, 10),
+    "guardian_fortress": (0, 11, 29, 17),
 }
 
 ROLE_SPAWN: dict[str, tuple[int, int]] = {
-    "courier":  (62, 8),
-    "analyst":  (38, 8),
-    "guardian": (10, 50),
+    "courier":  (24, 3),
+    "analyst":  (13, 3),
+    "guardian": (4, 15),
 }
 AGENT_SPAWN_OVERRIDES: dict[str, tuple[int, int]] = {
-    "courier-1": (60, 6),
-    "courier-2": (65, 10),
-    "analyst-1": (35, 7),
-    "analyst-2": (42, 10),
-    "guardian":  (8, 52),
+    "courier-1": (22, 3),
+    "courier-2": (26, 5),
+    "analyst-1": (11, 2),
+    "analyst-2": (15, 4),
+    "guardian":  (4, 15),
 }
 
 
@@ -50,6 +50,7 @@ class WorldSpatialEngine:
                 )
                 if dist <= radius:
                     contacts.append({"a": a["agent_id"], "b": b["agent_id"], "dist": round(dist, 2)})
+        contacts.sort(key=lambda item: (float(item["dist"]), str(item["a"]), str(item["b"])))
         return contacts
 
     @staticmethod
@@ -83,12 +84,12 @@ class WorldSpatialEngine:
             return False
         # Doorway openings (col, row) that override border walls
         _DOORWAYS: frozenset[tuple[int, int]] = frozenset({
-            (19, 10), (19, 11), (19, 12),
-            (10, 40), (11, 40), (12, 40),
-            (55, 8),  (55, 9),  (55, 10),
-            (40, 20), (41, 20), (42, 20),
-            (55, 24), (56, 24), (57, 24),
-            (40, 40), (41, 40), (42, 40),
+            (6, 3), (6, 4), (7, 3), (7, 4),
+            (3,10), (4,10), (3,11), (4,11),
+            (18,3), (18,4), (19,3), (19,4),
+            (14,5), (15,5), (14,6), (15,6),
+            (18,6), (19,6), (18,7), (19,7),
+            (14,10), (15,10), (14,11), (15,11),
         })
         if (col, row) in _DOORWAYS:
             return True

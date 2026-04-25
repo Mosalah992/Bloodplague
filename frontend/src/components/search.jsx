@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { fetchJson } from "../api";
 import {
+  formatApiTimestamp,
   RESULT_TABS,
   SEARCH_FILTERS,
   SEARCH_RUNS,
@@ -10,6 +12,16 @@ import {
   toneClasses
 } from "../data";
 import { SectionHeader } from "./chrome";
+
+const INVESTIGATION_GROUP_LABELS = {
+  same_injection_id: "same injection",
+  same_src_dst: "same route",
+  same_payload_hash: "same payload",
+  same_parent_payload_hash: "same parent payload",
+  same_mutation_lineage: "same mutation lineage",
+  same_semantic_family: "same semantic family",
+  time_adjacent: "time adjacent",
+};
 
 export function SearchTab({
   activeSearchRun,
@@ -147,12 +159,19 @@ export function SearchTab({
         <div className="space-y-4">
           <EventsTable events={searchEvents} selectedEvent={selectedEvent} setSelectedEventId={setSelectedEventId} />
           {selectedEvent ? (
-            <EventDetail
-              selectedEvent={selectedEvent}
-              onFetchEventDetail={onFetchEventDetail}
-              onRunSearch={onRunSearch}
-              setSearchQuery={setSearchQuery}
-            />
+            <>
+              <EventDetail
+                selectedEvent={selectedEvent}
+                onFetchEventDetail={onFetchEventDetail}
+                onRunSearch={onRunSearch}
+                setSearchQuery={setSearchQuery}
+              />
+              <InvestigationPanel
+                selectedEvent={selectedEvent}
+                onRunSearch={onRunSearch}
+                setSearchQuery={setSearchQuery}
+              />
+            </>
           ) : null}
           <ResultPanel tab={searchTab} patternCards={patternCards} statisticsCards={statisticsCards} intelligenceCards={intelligenceCards} timelineBars={timelineBars} />
         </div>
@@ -279,6 +298,11 @@ function EventDetail({ selectedEvent, onFetchEventDetail, onRunSearch, setSearch
               TRACE
             </button>
           )}
+          {selectedEvent.campaign_id && (
+            <button type="button" onClick={() => pivot(`campaign_id=${selectedEvent.campaign_id}`)} className="border border-terminal-info/20 px-3 py-2 font-pixel text-[6px] uppercase text-terminal-info">
+              CAMPAIGN
+            </button>
+          )}
           {selectedEvent.payload_hash && (
             <button type="button" onClick={() => pivot(`payload_hash=${selectedEvent.payload_hash}`)} className="border border-terminal-cyan/20 px-3 py-2 font-pixel text-[6px] uppercase text-terminal-purple">
               LINEAGE
@@ -343,6 +367,342 @@ function EventDetail({ selectedEvent, onFetchEventDetail, onRunSearch, setSearch
             </div>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+function InvestigationPanel({ selectedEvent, onRunSearch, setSearchQuery }) {
+  const [bundleState, setBundleState] = useState({
+    loading: false,
+    error: "",
+    detail: null,
+    trace: null,
+    related: null,
+    decision: null,
+    lineage: null,
+    warnings: [],
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadInvestigationBundle() {
+      if (!selectedEvent?.event_id) {
+        setBundleState({
+          loading: false,
+          error: "",
+          detail: null,
+          trace: null,
+          related: null,
+          decision: null,
+          lineage: null,
+          warnings: [],
+        });
+        return;
+      }
+
+      setBundleState((previous) => ({
+        ...previous,
+        loading: true,
+        error: "",
+        detail: null,
+        trace: null,
+        related: null,
+        decision: null,
+        lineage: null,
+        warnings: [],
+      }));
+
+      const eventId = selectedEvent.event_id;
+      const payloadHash = selectedEvent.payload_hash || "";
+      const [detailResult, traceResult, relatedResult, decisionResult, lineageResult] = await Promise.allSettled([
+        fetchJson(`/api/event/${encodeURIComponent(eventId)}?include_full_payload=false`),
+        fetchJson(`/api/trace/${encodeURIComponent(eventId)}`),
+        fetchJson(`/api/related/${encodeURIComponent(eventId)}`),
+        fetchJson(`/api/decision-summary/${encodeURIComponent(eventId)}`),
+        payloadHash ? fetchJson(`/api/payload-lineage/${encodeURIComponent(payloadHash)}`) : Promise.resolve(null),
+      ]);
+
+      if (cancelled) return;
+
+      const detail = detailResult.status === "fulfilled" ? detailResult.value?.event || null : null;
+      const resolvedPayloadHash = payloadHash || detail?.payload_hash || "";
+      let lineage = lineageResult.status === "fulfilled" ? lineageResult.value : null;
+
+      if (!lineage && resolvedPayloadHash) {
+        try {
+          lineage = await fetchJson(`/api/payload-lineage/${encodeURIComponent(resolvedPayloadHash)}`);
+        } catch {
+          lineage = null;
+        }
+      }
+
+      const warnings = dedupeStrings([
+        ...extractMessages(detailResult.status === "fulfilled" ? detailResult.value?.warnings : null),
+        ...extractMessages(traceResult.status === "fulfilled" ? traceResult.value?.warnings : null),
+        ...extractMessages(traceResult.status === "fulfilled" ? traceResult.value?.hints : null),
+        ...extractMessages(relatedResult.status === "fulfilled" ? relatedResult.value?.warnings : null),
+        ...extractMessages(decisionResult.status === "fulfilled" ? decisionResult.value?.warnings : null),
+        ...extractMessages(lineage?.warnings),
+      ]);
+
+      const error = [
+        extractSettledError(detailResult),
+        extractSettledError(traceResult),
+        extractSettledError(relatedResult),
+        extractSettledError(decisionResult),
+        extractSettledError(lineageResult),
+      ].find(Boolean) || "";
+
+      setBundleState({
+        loading: false,
+        error,
+        detail,
+        trace: traceResult.status === "fulfilled" ? traceResult.value : null,
+        related: relatedResult.status === "fulfilled" ? relatedResult.value : null,
+        decision: decisionResult.status === "fulfilled" ? decisionResult.value : null,
+        lineage,
+        warnings,
+      });
+    }
+
+    loadInvestigationBundle();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedEvent?.event_id, selectedEvent?.payload_hash]);
+
+  function pivot(query) {
+    setSearchQuery(query);
+    onRunSearch(query);
+  }
+
+  const detailEvent = bundleState.detail || selectedEvent;
+  const detailMetadata = detailEvent?.metadata || {};
+  const decisionSummary = bundleState.decision?.summary || {};
+  const traceChain = bundleState.trace?.compact_chain || [];
+  const relatedSummary = Object.entries(bundleState.related?.summary || {}).filter(([, count]) => Number(count) > 0);
+  const relatedGroups = Object.entries(bundleState.related?.groups || {}).filter(([, events]) => Array.isArray(events) && events.length > 0);
+  const lineageSummary = bundleState.lineage?.summary || {};
+
+  const iocCards = [
+    ["injection_id", detailEvent?.injection_id || detailMetadata.injection_id || ""],
+    ["payload_hash", detailEvent?.payload_hash || detailMetadata.payload_hash || ""],
+    ["semantic_family", detailEvent?.semantic_family || detailMetadata.semantic_family || ""],
+    ["strain_id", detailMetadata.strain_id || ""],
+    ["campaign_id", detailEvent?.campaign_id || detailMetadata.campaign_id || ""],
+    ["trace_id", detailMetadata.trace_id || ""],
+  ].filter(([, value]) => value);
+
+  const tacticCards = [
+    ["kill_chain", detailEvent?.kill_chain_stage || detailMetadata.kill_chain_stage || decisionSummary.phase || ""],
+    ["objective", decisionSummary.objective || detailMetadata.objective || ""],
+    ["strategy_family", decisionSummary.strategy_family || detailMetadata.strategy_family || ""],
+    ["technique", decisionSummary.technique || detailMetadata.technique || ""],
+    ["decision_source", detailEvent?.decision_source || detailMetadata.decision_source || ""],
+    ["cognition_tier", detailEvent?.cognition_tier || detailMetadata.cognition_tier || ""],
+  ].filter(([, value]) => value);
+
+  const correlationCards = [
+    ["trace_scope", bundleState.trace?.scope_reason || ""],
+    ["scope_confidence", bundleState.trace?.scope_confidence != null ? Number(bundleState.trace.scope_confidence).toFixed(2) : ""],
+    ["related_events", lineageSummary.related_event_count ?? ""],
+    ["child_payloads", lineageSummary.child_count ?? ""],
+    ["lineage_depth", lineageSummary.lineage_depth ?? ""],
+    ["mutation_edges", lineageSummary.edge_count ?? ""],
+  ].filter(([, value]) => value !== "" && value != null);
+
+  return (
+    <div className="terminal-panel p-4">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="font-pixel text-[7px] uppercase text-terminal-cyan">INVESTIGATION_BUNDLE</div>
+          <div className="mt-2 font-mono text-[12px] text-slate-500">
+            {bundleState.loading ? "loading trace, related events, lineage, and tactic context..." : "correlated event context for report drafting"}
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {detailEvent?.injection_id && (
+            <button type="button" onClick={() => pivot(`injection_id=${detailEvent.injection_id}`)} className="border border-terminal-cyan/20 px-3 py-2 font-pixel text-[6px] uppercase text-terminal-cyan">
+              PIVOT_TRACE
+            </button>
+          )}
+          {detailEvent?.payload_hash && (
+            <button type="button" onClick={() => pivot(`payload_hash=${detailEvent.payload_hash}`)} className="border border-terminal-purple/20 px-3 py-2 font-pixel text-[6px] uppercase text-terminal-purple">
+              PIVOT_HASH
+            </button>
+          )}
+          {detailEvent?.campaign_id && (
+            <button type="button" onClick={() => pivot(`campaign_id=${detailEvent.campaign_id}`)} className="border border-terminal-info/20 px-3 py-2 font-pixel text-[6px] uppercase text-terminal-info">
+              PIVOT_CAMPAIGN
+            </button>
+          )}
+        </div>
+      </div>
+
+      {bundleState.error ? (
+        <div className="mb-4 border border-terminal-warn/25 bg-terminal-warn/10 px-3 py-3 font-mono text-[12px] text-terminal-warn">
+          partial investigation data unavailable :: {bundleState.error}
+        </div>
+      ) : null}
+
+      {decisionSummary.quick_explanation ? (
+        <div className="mb-4 border border-terminal-info/20 bg-[#0b1016] p-3">
+          <div className="font-pixel text-[6px] uppercase text-terminal-info/80">TACTIC_SUMMARY</div>
+          <div className="mt-2 font-mono text-[12px] text-slate-300">{decisionSummary.quick_explanation}</div>
+        </div>
+      ) : null}
+
+      <div className="grid gap-4 xl:grid-cols-3">
+        <InvestigationCard title="IOCS" tone="purple" items={iocCards} />
+        <InvestigationCard title="TACTICS" tone="amber" items={tacticCards} />
+        <InvestigationCard title="CORRELATION" tone="cyan" items={correlationCards} />
+      </div>
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
+        <div className="space-y-4">
+          <div className="border border-white/10 bg-[#0b1016] p-3">
+            <div className="mb-3 font-pixel text-[6px] uppercase text-terminal-cyan/80">TRACE_CHAIN</div>
+            {traceChain.length ? (
+              <div className="space-y-2">
+                {traceChain.slice(0, 10).map((step, index) => (
+                  <div key={`${step.event}-${index}`} className="border border-white/10 bg-[#0a0f15] p-3">
+                    <div className="flex flex-wrap items-center gap-3 font-mono text-[12px]">
+                      <span className="text-slate-600">#{String(index + 1).padStart(2, "0")}</span>
+                      <span className={eventTypeClass(step.event)}>{step.event}</span>
+                      <span className="text-terminal-info">{step.src || "-"}</span>
+                      <span className="text-slate-700">-&gt;</span>
+                      <span className="text-terminal-purple">{step.dst || "-"}</span>
+                      {step.kill_chain_stage ? <span className="text-terminal-warn">kc={step.kill_chain_stage}</span> : null}
+                    </div>
+                    <div className="mt-2 font-mono text-[11px] text-slate-500">
+                      {[step.attack_type, step.payload_hash ? `hash=${step.payload_hash}` : "", step.semantic_family ? `family=${step.semantic_family}` : "", step.mutation_type ? `mutation=${step.mutation_type}` : ""]
+                        .filter(Boolean)
+                        .join(" | ")}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="font-mono text-[12px] text-slate-600">no trace chain available for this event</div>
+            )}
+          </div>
+
+          <div className="border border-white/10 bg-[#0b1016] p-3">
+            <div className="mb-3 font-pixel text-[6px] uppercase text-terminal-cyan/80">RELATED_ACTIVITY</div>
+            {relatedGroups.length ? (
+              <div className="space-y-3">
+                {relatedGroups.slice(0, 4).map(([group, events]) => (
+                  <div key={group} className="border border-white/10 bg-[#0a0f15] p-3">
+                    <div className="flex items-center justify-between gap-2 font-pixel text-[6px] uppercase">
+                      <span className="text-terminal-cyan">{INVESTIGATION_GROUP_LABELS[group] || group}</span>
+                      <span className="text-slate-500">{events.length} events</span>
+                    </div>
+                    <div className="mt-3 space-y-2">
+                      {events.slice(0, 3).map((event) => (
+                        <div key={event.event_id || event.id} className="font-mono text-[12px] text-slate-400">
+                          <div>
+                            <span className="text-slate-600">{formatApiTimestamp(event.ts)}</span>
+                            <span className="mx-2 text-slate-700">::</span>
+                            <span className={eventTypeClass(event.event)}>{event.event}</span>
+                            <span className="mx-2 text-slate-700">::</span>
+                            <span>{event.src || "-"}</span>
+                            <span className="mx-2 text-slate-700">-&gt;</span>
+                            <span>{event.dst || "-"}</span>
+                          </div>
+                          <div className="mt-1 text-[11px] text-slate-500">
+                            {[event.injection_id ? `injection=${event.injection_id}` : "", event.payload_hash ? `hash=${event.payload_hash}` : "", event.mutation_type ? `mutation=${event.mutation_type}` : ""]
+                              .filter(Boolean)
+                              .join(" | ")}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="font-mono text-[12px] text-slate-600">no correlated related activity loaded</div>
+            )}
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          <div className="border border-white/10 bg-[#0b1016] p-3">
+            <div className="mb-3 font-pixel text-[6px] uppercase text-terminal-purple/80">LINEAGE_SUMMARY</div>
+            {Object.keys(lineageSummary).length ? (
+              <div className="grid gap-3">
+                {[
+                  ["focus_payload_hash", lineageSummary.focus_payload_hash],
+                  ["semantic_family", lineageSummary.semantic_family],
+                  ["related_event_count", lineageSummary.related_event_count],
+                  ["child_count", lineageSummary.child_count],
+                  ["lineage_depth", lineageSummary.lineage_depth],
+                  ["max_lineage_depth", lineageSummary.max_lineage_depth],
+                ].filter(([, value]) => value !== "" && value != null).map(([label, value]) => (
+                  <div key={label} className="border border-white/10 bg-[#0a0f15] p-3">
+                    <div className="font-pixel text-[6px] uppercase text-terminal-purple/70">{label}</div>
+                    <div className="mt-2 font-mono text-[12px] break-all text-slate-300">{String(value)}</div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="font-mono text-[12px] text-slate-600">no payload lineage available</div>
+            )}
+          </div>
+
+          <div className="border border-white/10 bg-[#0b1016] p-3">
+            <div className="mb-3 font-pixel text-[6px] uppercase text-terminal-info/80">CORRELATION_COUNTS</div>
+            {relatedSummary.length ? (
+              <div className="space-y-2">
+                {relatedSummary.map(([label, count]) => (
+                  <div key={label} className="flex items-center justify-between border border-white/10 bg-[#0a0f15] px-3 py-2 font-mono text-[12px] text-slate-400">
+                    <span>{INVESTIGATION_GROUP_LABELS[label] || label}</span>
+                    <span className="text-terminal-cyan">{count}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="font-mono text-[12px] text-slate-600">no correlation counts available</div>
+            )}
+          </div>
+
+          <div className="border border-white/10 bg-[#0b1016] p-3">
+            <div className="mb-3 font-pixel text-[6px] uppercase text-terminal-warn/80">WARNINGS_AND_HINTS</div>
+            {bundleState.warnings.length ? (
+              <div className="space-y-2">
+                {bundleState.warnings.slice(0, 8).map((warning, index) => (
+                  <div key={`${warning}-${index}`} className="border border-terminal-warn/20 bg-terminal-warn/5 px-3 py-2 font-mono text-[12px] text-terminal-warn">
+                    {warning}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="font-mono text-[12px] text-slate-600">no warnings or hints for this event</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InvestigationCard({ title, tone, items }) {
+  return (
+    <div className="border border-white/10 bg-[#0b1016] p-3">
+      <div className={`mb-3 font-pixel text-[6px] uppercase ${toneClasses(tone)}`}>{title}</div>
+      {items.length ? (
+        <div className="space-y-2">
+          {items.map(([label, value]) => (
+            <div key={label} className="border border-white/10 bg-[#0a0f15] px-3 py-2">
+              <div className="font-pixel text-[6px] uppercase text-slate-500">{label}</div>
+              <div className="mt-2 font-mono text-[12px] break-all text-slate-300">{String(value)}</div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="font-mono text-[12px] text-slate-600">no {title.toLowerCase()} available</div>
       )}
     </div>
   );
@@ -461,4 +821,22 @@ function SearchSidebar({ sidebarPivots, hints, queryHelp }) {
       </div>
     </div>
   );
+}
+
+function extractMessages(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => extractMessages(entry));
+  }
+  if (typeof value === "string") return [value];
+  return [value.message || value.title || value.reason || JSON.stringify(value)];
+}
+
+function extractSettledError(result) {
+  if (!result || result.status !== "rejected") return "";
+  return result.reason?.message || String(result.reason || "");
+}
+
+function dedupeStrings(values) {
+  return Array.from(new Set(values.filter(Boolean)));
 }

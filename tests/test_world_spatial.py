@@ -32,8 +32,8 @@ import math
 
 def test_zone_for_position():
     assert WorldSpatialEngine.zone_for(col=5, row=5) == "hub"
-    assert WorldSpatialEngine.zone_for(col=70, row=5) == "courier_zone"
-    assert WorldSpatialEngine.zone_for(col=5, row=50) == "guardian_fortress"
+    assert WorldSpatialEngine.zone_for(col=24, row=5) == "courier_zone"
+    assert WorldSpatialEngine.zone_for(col=5, row=15) == "guardian_fortress"
 
 def test_proximity_contacts():
     contacts = WorldSpatialEngine.proximity_contacts(
@@ -47,6 +47,19 @@ def test_proximity_contacts():
     pairs = {(c["a"], c["b"]) for c in contacts}
     assert ("courier-1", "analyst-1") in pairs or ("analyst-1", "courier-1") in pairs
     assert not any("guardian" in (c["a"], c["b"]) for c in contacts)
+
+
+def test_proximity_contacts_are_sorted_by_distance():
+    contacts = WorldSpatialEngine.proximity_contacts(
+        positions=[
+            {"agent_id": "guardian", "col": 10, "row": 10, "zone": "hub"},
+            {"agent_id": "analyst-1", "col": 11, "row": 10, "zone": "hub"},
+            {"agent_id": "courier-1", "col": 14, "row": 10, "zone": "hub"},
+        ],
+        radius=5,
+    )
+
+    assert contacts[0]["dist"] <= contacts[1]["dist"]
 
 def test_move_toward():
     new_pos = WorldSpatialEngine.move_toward(
@@ -67,13 +80,13 @@ def test_is_passable_wall():
 
 def test_is_passable_doorway():
     # Doorways open through walls
-    assert WorldSpatialEngine.is_passable(19, 10)  # hub ↔ analyst_bay
-    assert WorldSpatialEngine.is_passable(10, 40)  # hub ↔ guardian_fortress
+    assert WorldSpatialEngine.is_passable(7, 3)   # hub ↔ analyst_bay
+    assert WorldSpatialEngine.is_passable(4, 11)  # hub ↔ guardian_fortress
 
 
 def test_is_passable_out_of_bounds():
     assert not WorldSpatialEngine.is_passable(-1, 0)
-    assert not WorldSpatialEngine.is_passable(0, 60)
+    assert not WorldSpatialEngine.is_passable(0, 30)
 
 
 def test_contamination_tile_crud():

@@ -10,7 +10,8 @@ const PROXY_PATHS = [
   "/vaccine",
   "/status",
   "/events",
-  "/logs"
+  "/logs",
+  "/pixel-assets",
 ];
 
 export default defineConfig(({ mode }) => {

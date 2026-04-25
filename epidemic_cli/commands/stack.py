@@ -57,11 +57,16 @@ def restart() -> None:
     up()
 
 
-def rebuild() -> None:
-    build = run_compose(["build"], capture_output=True)
-    if build.returncode != 0:
-        print_message(f"docker compose build failed\n{build.stderr or build.stdout}", style="red")
+def build() -> None:
+    result = run_compose(["build"], capture_output=True)
+    if result.returncode != 0:
+        print_message(f"docker compose build failed\n{result.stderr or result.stdout}", style="red")
         raise SystemExit(1)
+    print_message("stack built", style="green")
+
+
+def rebuild() -> None:
+    build()
     up()
 
 

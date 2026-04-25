@@ -3,6 +3,7 @@ export const TAB_LABELS = {
   search: "investigate",
   live: "live_feed",
   world: "world_sim",
+  courier: "courier_chat",
 };
 
 export const SEARCH_RUNS = [
@@ -293,6 +294,20 @@ export function normalizeLiveEvent(event, index = 0) {
   const metadata = event.metadata || {};
   const type = String(event.event || metadata.event_type || "EVENT").toUpperCase();
   const payloadLength = Number(event.payload_length || metadata.payload_length || metadata.bytes || metadata.bytes_transferred || 0);
+  const trustEffect = Number(
+    event.trust_delta ??
+      metadata.trust_delta ??
+      event.effect_on_trust?.trust_delta ??
+      metadata.effect_on_trust?.trust_delta ??
+      0
+  );
+  const guardianPressureDelta = Number(
+    event.guardian_pressure_delta ??
+      metadata.guardian_pressure_delta ??
+      event.effect_on_guardian_pressure?.pressure_delta ??
+      metadata.effect_on_guardian_pressure?.pressure_delta ??
+      0
+  );
   const detailParts = [
     event.attack_type || metadata.attack_type || "",
     payloadLength > 0 ? `bytes:${payloadLength}` : "",
@@ -347,6 +362,13 @@ export function normalizeLiveEvent(event, index = 0) {
     cognitionTier: event.cognition_tier || metadata.cognition_tier || "",
     decisionSource: event.decision_source || metadata.decision_source || "",
     quarantineTrigger: event.quarantine_trigger || metadata.quarantine_trigger || "",
+    roundId: Number(event.round_id ?? metadata.round_id ?? 0),
+    intent: event.intent || event.attack_type || metadata.intent || metadata.attack_type || "",
+    parentId: event.derived_from_message_id || metadata.derived_from_message_id || "",
+    trustDelta: Number.isFinite(trustEffect) ? trustEffect : 0,
+    guardianPressureDelta: Number.isFinite(guardianPressureDelta) ? guardianPressureDelta : 0,
+    effectOnTrust: event.effect_on_trust || metadata.effect_on_trust || {},
+    effectOnGuardianPressure: event.effect_on_guardian_pressure || metadata.effect_on_guardian_pressure || {},
     beaconed: isBeaconedLiveEvent({ type, src: event.src || metadata.src_agent || "", dst: event.dst || metadata.dst_agent || "" })
   };
 }

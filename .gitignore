@@ -85,3 +85,4 @@ $RECYCLE.BIN/
 
 # ---- Docker (local overrides) -----------------------------------------------
 docker-compose.override.yml
+.gitnexus

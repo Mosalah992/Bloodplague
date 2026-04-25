@@ -39,12 +39,106 @@ def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
 
+def _float_or(value: Any, default: float) -> float:
+    if value is None or value == "":
+        return default
+    return float(value)
+
+
+def _int_or(value: Any, default: int) -> int:
+    if value is None or value == "":
+        return default
+    return int(value)
+
+
+INQUIRY_CAP = 4
+STREAK_BREAK_THRESHOLD = 8
+FLOOR_WINDOW = 50
+DEFICIT_BOOST_MULTIPLIER = 3.0
+INQUIRY_SATURATION_PENALTY = -0.015
+FORCED_RESOLUTION_TRUST_COST = -0.005
+GUARDIAN_DEBUG = False
+MISSION_SUCCESS_TRUST_DELTA = 0.08
+MISSION_SUCCESS_STRAIN_RESISTANCE = 0.10
+MISSION_FAILURE_TRUST_DELTA = -0.12
+MISSION_FAILURE_GUARDIAN_BUMP = 0.03
+MISSION_COMPROMISE_TRUST_DELTA = -0.20
+MISSION_COMPROMISE_GUARDIAN_BUMP = 0.06
+MISSION_DEADLINE_WINDOW = 40
+MISSION_MAX_CONCURRENT_PER_AGENT = 2
+MISSION_RELAY_CHAIN_MAX_LENGTH = 3
+MISSION_RECENT_CONTACT_WINDOW = 20
+MISSION_REASSIGN_COOLDOWN = 15
+MISSION_PAYLOAD_MIN_KEYWORDS = 2
+MISSION_RESISTANCE_DECAY_PER_ROUND = 0.01
+DEFAULT_STRAIN_FLOORS: Dict[str, float] = {
+    "context_poisoning": 0.60,
+    "prompt_injection": 0.20,
+    "authority_framing": 0.15,
+}
+
+
+def _json_loads_any(value: Any, default: Any) -> Any:
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str):
+        return default
+    value = value.strip()
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
+
+
+def _canonical_guardian_record(record: Dict[str, Any]) -> tuple[float, str, Dict[str, Any]]:
+    guardian = dict(record.get("guardian") or {})
+    pressure = float(guardian.get("pressure", record.get("guardian_pressure_score", 0.0)) or 0.0)
+    state = str(guardian.get("state") or record.get("guardian_degradation_level") or "G0_NOMINAL")
+    guardian["pressure"] = pressure
+    guardian["state"] = state
+    return pressure, state, guardian
+
+
 @dataclass(frozen=True)
 class WorldConfig:
     db_path: str
     round_selection_seed: int
     trust_decay_window_rounds: int
     guardian_dependence_enabled: bool
+    inquiry_cap: int = INQUIRY_CAP
+    streak_break_threshold: int = STREAK_BREAK_THRESHOLD
+    floor_window: int = FLOOR_WINDOW
+    deficit_boost_multiplier: float = DEFICIT_BOOST_MULTIPLIER
+    inquiry_saturation_penalty: float = INQUIRY_SATURATION_PENALTY
+    forced_resolution_trust_cost: float = FORCED_RESOLUTION_TRUST_COST
+    guardian_debug: bool = GUARDIAN_DEBUG
+    mission_success_trust_delta: float = MISSION_SUCCESS_TRUST_DELTA
+    mission_success_strain_resistance: float = MISSION_SUCCESS_STRAIN_RESISTANCE
+    mission_failure_trust_delta: float = MISSION_FAILURE_TRUST_DELTA
+    mission_failure_guardian_bump: float = MISSION_FAILURE_GUARDIAN_BUMP
+    mission_compromise_trust_delta: float = MISSION_COMPROMISE_TRUST_DELTA
+    mission_compromise_guardian_bump: float = MISSION_COMPROMISE_GUARDIAN_BUMP
+    mission_deadline_window: int = MISSION_DEADLINE_WINDOW
+    mission_max_concurrent_per_agent: int = MISSION_MAX_CONCURRENT_PER_AGENT
+    mission_relay_chain_max_length: int = MISSION_RELAY_CHAIN_MAX_LENGTH
+    strain_floors: Dict[str, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.strain_floors is None:
+            object.__setattr__(self, "strain_floors", dict(DEFAULT_STRAIN_FLOORS))
+        else:
+            object.__setattr__(
+                self,
+                "strain_floors",
+                {
+                    str(name): float(value)
+                    for name, value in dict(self.strain_floors).items()
+                },
+            )
 
     @staticmethod
     def from_env() -> "WorldConfig":
@@ -65,12 +159,83 @@ class WorldConfig:
             "yes",
             "on",
         )
+        strain_floors = dict(DEFAULT_STRAIN_FLOORS)
+        strain_floors_raw = os.environ.get("WORLD_STRAIN_FLOORS_JSON", "").strip()
+        if strain_floors_raw:
+            try:
+                parsed = json.loads(strain_floors_raw)
+                if isinstance(parsed, dict):
+                    for key, value in parsed.items():
+                        strain_floors[str(key)] = float(value)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
         return WorldConfig(
             db_path=db_path,
             round_selection_seed=seed,
             trust_decay_window_rounds=decay,
             guardian_dependence_enabled=depend,
+            inquiry_cap=max(1, _int_or(os.environ.get("INQUIRY_CAP"), INQUIRY_CAP)),
+            streak_break_threshold=max(1, _int_or(os.environ.get("STREAK_BREAK_THRESHOLD"), STREAK_BREAK_THRESHOLD)),
+            floor_window=max(1, _int_or(os.environ.get("FLOOR_WINDOW"), FLOOR_WINDOW)),
+            deficit_boost_multiplier=max(
+                1.0,
+                _float_or(os.environ.get("DEFICIT_BOOST_MULTIPLIER"), DEFICIT_BOOST_MULTIPLIER),
+            ),
+            inquiry_saturation_penalty=_float_or(
+                os.environ.get("INQUIRY_SATURATION_PENALTY"),
+                INQUIRY_SATURATION_PENALTY,
+            ),
+            forced_resolution_trust_cost=_float_or(
+                os.environ.get("FORCED_RESOLUTION_TRUST_COST"),
+                FORCED_RESOLUTION_TRUST_COST,
+            ),
+            guardian_debug=os.environ.get("GUARDIAN_DEBUG", "0").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            ),
+            mission_success_trust_delta=_float_or(
+                os.environ.get("MISSION_SUCCESS_TRUST_DELTA"),
+                MISSION_SUCCESS_TRUST_DELTA,
+            ),
+            mission_success_strain_resistance=_float_or(
+                os.environ.get("MISSION_SUCCESS_STRAIN_RESISTANCE"),
+                MISSION_SUCCESS_STRAIN_RESISTANCE,
+            ),
+            mission_failure_trust_delta=_float_or(
+                os.environ.get("MISSION_FAILURE_TRUST_DELTA"),
+                MISSION_FAILURE_TRUST_DELTA,
+            ),
+            mission_failure_guardian_bump=_float_or(
+                os.environ.get("MISSION_FAILURE_GUARDIAN_BUMP"),
+                MISSION_FAILURE_GUARDIAN_BUMP,
+            ),
+            mission_compromise_trust_delta=_float_or(
+                os.environ.get("MISSION_COMPROMISE_TRUST_DELTA"),
+                MISSION_COMPROMISE_TRUST_DELTA,
+            ),
+            mission_compromise_guardian_bump=_float_or(
+                os.environ.get("MISSION_COMPROMISE_GUARDIAN_BUMP"),
+                MISSION_COMPROMISE_GUARDIAN_BUMP,
+            ),
+            mission_deadline_window=max(
+                1,
+                _int_or(os.environ.get("MISSION_DEADLINE_WINDOW"), MISSION_DEADLINE_WINDOW),
+            ),
+            mission_max_concurrent_per_agent=max(
+                1,
+                _int_or(os.environ.get("MISSION_MAX_CONCURRENT_PER_AGENT"), MISSION_MAX_CONCURRENT_PER_AGENT),
+            ),
+            mission_relay_chain_max_length=max(
+                1,
+                _int_or(os.environ.get("MISSION_RELAY_CHAIN_MAX_LENGTH"), MISSION_RELAY_CHAIN_MAX_LENGTH),
+            ),
+            strain_floors=strain_floors,
         )
+
+
+_tls = threading.local()
 
 
 class WorldDB:
@@ -83,25 +248,82 @@ class WorldDB:
 
     def __init__(self, cfg: WorldConfig):
         self.cfg = cfg
-        self._conn: sqlite3.Connection | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._conn_cache_key = f"{self.cfg.db_path}:{uuid.uuid4().hex}"
         self._init_db()
 
+    def _conn_cache(self) -> dict[str, sqlite3.Connection]:
+        conns = getattr(_tls, "world_db_conns", None)
+        if conns is None:
+            conns = {}
+            _tls.world_db_conns = conns
+        return conns
+
+    def _conn_is_healthy(self, conn: sqlite3.Connection) -> bool:
+        try:
+            conn.execute("PRAGMA schema_version").fetchone()
+            return True
+        except (sqlite3.DatabaseError, sqlite3.ProgrammingError):
+            return False
+
+    def _replace_conn(self, cache: dict[str, sqlite3.Connection]) -> sqlite3.Connection:
+        stale = cache.pop(self._conn_cache_key, None)
+        if stale is not None:
+            try:
+                stale.close()
+            except sqlite3.Error:
+                pass
+        conn = self._make_conn()
+        cache[self._conn_cache_key] = conn
+        return conn
+
+    def _make_conn(self) -> sqlite3.Connection:
+        db_dir = os.path.dirname(self.cfg.db_path)
+        if db_dir and self.cfg.db_path != ":memory:":
+            os.makedirs(db_dir, exist_ok=True)
+        conn = sqlite3.connect(self.cfg.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
     def _get_conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            db_dir = os.path.dirname(self.cfg.db_path)
-            if db_dir:
-                os.makedirs(db_dir, exist_ok=True)
-            self._conn = sqlite3.connect(self.cfg.db_path, timeout=10.0, check_same_thread=False)
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
-            self._conn.execute("PRAGMA foreign_keys=ON")
-        return self._conn
+        if self.cfg.db_path == ":memory:":
+            # In-memory DBs must not share a TLS connection — each WorldDB instance needs its own.
+            conn = self.__dict__.get("_mem_conn")
+            if conn is None:
+                conn = self._make_conn()
+                self.__dict__["_mem_conn"] = conn
+            elif not self._conn_is_healthy(conn):
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+                conn = self._make_conn()
+                self.__dict__["_mem_conn"] = conn
+            return conn
+        conns = self._conn_cache()
+        conn = conns.get(self._conn_cache_key)
+        if conn is None:
+            conn = self._make_conn()
+            conns[self._conn_cache_key] = conn
+        elif not self._conn_is_healthy(conn):
+            conn = self._replace_conn(conns)
+        return conn
 
     def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        if self.cfg.db_path == ":memory:":
+            conn = self.__dict__.get("_mem_conn")
+            if conn is not None:
+                conn.close()
+                self.__dict__.pop("_mem_conn", None)
+            return
+        conns = getattr(_tls, "world_db_conns", None)
+        conn = conns.get(self._conn_cache_key) if isinstance(conns, dict) else None
+        if conn is not None:
+            conn.close()
+            conns.pop(self._conn_cache_key, None)
 
     def _init_db(self) -> None:
         conn = self._get_conn()
@@ -115,7 +337,8 @@ class WorldDB:
                 quarantine_status TEXT NOT NULL,
                 influence_weight REAL NOT NULL,
                 memory_summary TEXT NOT NULL,
-                last_active_round INTEGER NOT NULL
+                last_active_round INTEGER NOT NULL,
+                mutation TEXT NOT NULL DEFAULT '{}'
             );
 
             CREATE TABLE IF NOT EXISTS relationship (
@@ -148,6 +371,12 @@ class WorldDB:
                 effect_on_receiver TEXT NOT NULL,
                 effect_on_trust TEXT NOT NULL,
                 effect_on_guardian_pressure TEXT NOT NULL,
+                llm_authored INTEGER NOT NULL DEFAULT 1,
+                actor_id TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                prompt_context_hash TEXT NOT NULL DEFAULT '',
+                raw_llm_output_hash TEXT NOT NULL DEFAULT '',
+                validation_status TEXT NOT NULL DEFAULT '',
                 created_ts REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_message_round ON message(round_id);
@@ -158,7 +387,26 @@ class WorldDB:
                 active_strain_families TEXT NOT NULL,
                 global_infection_pressure REAL NOT NULL,
                 guardian_pressure_score REAL NOT NULL,
-                guardian_degradation_level TEXT NOT NULL
+                guardian_degradation_level TEXT NOT NULL,
+                open_inquiries TEXT NOT NULL DEFAULT '{}',
+                same_pair_streak TEXT NOT NULL DEFAULT '{}',
+                forced_resolution_targets TEXT NOT NULL DEFAULT '{}',
+                strain_distribution TEXT NOT NULL DEFAULT '{}',
+                strain_window_history TEXT NOT NULL DEFAULT '[]',
+                missions TEXT NOT NULL DEFAULT '[]',
+                investigation_targets TEXT NOT NULL DEFAULT '[]',
+                mission_event_log TEXT NOT NULL DEFAULT '[]',
+                mission_resistance TEXT NOT NULL DEFAULT '{}',
+                mission_stats TEXT NOT NULL DEFAULT '{}',
+                mission_counter INTEGER NOT NULL DEFAULT 0,
+                guardian_pressure_from_missions REAL NOT NULL DEFAULT 0.0,
+                guardian TEXT NOT NULL DEFAULT '{}',
+                quarantine_list TEXT NOT NULL DEFAULT '[]',
+                artifacts TEXT NOT NULL DEFAULT '{}',
+                c2 TEXT NOT NULL DEFAULT '{}',
+                campaign_registry TEXT NOT NULL DEFAULT '{}',
+                strain_registry TEXT NOT NULL DEFAULT '{}',
+                reset_history TEXT NOT NULL DEFAULT '[]'
             );
 
             CREATE TABLE IF NOT EXISTS quarantine_edge (
@@ -177,6 +425,11 @@ class WorldDB:
                 selection_scores TEXT NOT NULL,
                 action_taken TEXT NOT NULL,
                 terminal_after_round INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS round_sequence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_ts REAL NOT NULL
             );
 
             -- Analyst/Guardian lineage assessments (for deterministic trust updates).
@@ -217,9 +470,61 @@ class WorldDB:
                 row INTEGER NOT NULL,
                 placed_by TEXT NOT NULL DEFAULT 'guardian',
                 round_id INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL DEFAULT 'active',
+                progress REAL NOT NULL DEFAULT 1.0,
+                started_round INTEGER NOT NULL DEFAULT 0,
+                completed_round INTEGER NOT NULL DEFAULT 0,
+                effect_radius INTEGER NOT NULL DEFAULT 0,
+                hp REAL NOT NULL DEFAULT 1.0,
                 active INTEGER NOT NULL DEFAULT 1
             )
         """)
+        for col_name, ddl in (
+            ("state", "ALTER TABLE world_structures ADD COLUMN state TEXT NOT NULL DEFAULT 'active'"),
+            ("progress", "ALTER TABLE world_structures ADD COLUMN progress REAL NOT NULL DEFAULT 1.0"),
+            ("started_round", "ALTER TABLE world_structures ADD COLUMN started_round INTEGER NOT NULL DEFAULT 0"),
+            ("completed_round", "ALTER TABLE world_structures ADD COLUMN completed_round INTEGER NOT NULL DEFAULT 0"),
+            ("effect_radius", "ALTER TABLE world_structures ADD COLUMN effect_radius INTEGER NOT NULL DEFAULT 0"),
+            ("hp", "ALTER TABLE world_structures ADD COLUMN hp REAL NOT NULL DEFAULT 1.0"),
+        ):
+            try:
+                conn.execute(ddl)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+        for ddl in (
+            "ALTER TABLE agent_state ADD COLUMN mutation TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE system_state ADD COLUMN open_inquiries TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE system_state ADD COLUMN same_pair_streak TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE system_state ADD COLUMN forced_resolution_targets TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE system_state ADD COLUMN strain_distribution TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE system_state ADD COLUMN strain_window_history TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE system_state ADD COLUMN missions TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE system_state ADD COLUMN investigation_targets TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE system_state ADD COLUMN mission_event_log TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE system_state ADD COLUMN mission_resistance TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE system_state ADD COLUMN mission_stats TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE system_state ADD COLUMN mission_counter INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE system_state ADD COLUMN guardian_pressure_from_missions REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE system_state ADD COLUMN guardian TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE system_state ADD COLUMN quarantine_list TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE system_state ADD COLUMN artifacts TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE system_state ADD COLUMN c2 TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE system_state ADD COLUMN campaign_registry TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE system_state ADD COLUMN strain_registry TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE system_state ADD COLUMN reset_history TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE message ADD COLUMN llm_authored INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE message ADD COLUMN actor_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE message ADD COLUMN model TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE message ADD COLUMN prompt_context_hash TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE message ADD COLUMN raw_llm_output_hash TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE message ADD COLUMN validation_status TEXT NOT NULL DEFAULT ''",
+        ):
+            try:
+                conn.execute(ddl)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
         conn.execute("""
             CREATE TABLE IF NOT EXISTS contamination_tiles (
                 tile_key TEXT PRIMARY KEY,
@@ -229,6 +534,13 @@ class WorldDB:
                 updated_round INTEGER NOT NULL DEFAULT 0
             )
         """)
+        max_round = conn.execute("SELECT COALESCE(MAX(round_id), 0) FROM round").fetchone()[0]
+        max_sequence = conn.execute("SELECT COALESCE(MAX(id), 0) FROM round_sequence").fetchone()[0]
+        if int(max_sequence or 0) < int(max_round or 0):
+            conn.execute(
+                "INSERT OR IGNORE INTO round_sequence(id, created_ts) VALUES (?, ?)",
+                (int(max_round), _utc_ts()),
+            )
         conn.commit()
 
     # ──────────────────────────────────────────────────────────────
@@ -240,12 +552,26 @@ class WorldDB:
         row = conn.execute("SELECT COALESCE(MAX(round_id), 0) FROM round").fetchone()
         return int(row[0] or 0)
 
+    def next_round_id(self) -> int:
+        with self._lock:
+            conn = self._get_conn()
+            max_round = conn.execute("SELECT COALESCE(MAX(round_id), 0) FROM round").fetchone()[0]
+            max_sequence = conn.execute("SELECT COALESCE(MAX(id), 0) FROM round_sequence").fetchone()[0]
+            if int(max_sequence or 0) < int(max_round or 0):
+                conn.execute(
+                    "INSERT OR IGNORE INTO round_sequence(id, created_ts) VALUES (?, ?)",
+                    (int(max_round), _utc_ts()),
+                )
+            cur = conn.execute("INSERT INTO round_sequence(created_ts) VALUES (?)", (_utc_ts(),))
+            conn.commit()
+            return int(cur.lastrowid)
+
     def upsert_agent_state(self, record: Dict[str, Any]) -> None:
         conn = self._get_conn()
         conn.execute(
             """
-            INSERT INTO agent_state(agent_id, role, contamination_level, global_trust, quarantine_status, influence_weight, memory_summary, last_active_round)
-            VALUES(?,?,?,?,?,?,?,?)
+            INSERT INTO agent_state(agent_id, role, contamination_level, global_trust, quarantine_status, influence_weight, memory_summary, last_active_round, mutation)
+            VALUES(?,?,?,?,?,?,?,?,?)
             ON CONFLICT(agent_id) DO UPDATE SET
                 role=excluded.role,
                 contamination_level=excluded.contamination_level,
@@ -253,17 +579,19 @@ class WorldDB:
                 quarantine_status=excluded.quarantine_status,
                 influence_weight=excluded.influence_weight,
                 memory_summary=excluded.memory_summary,
-                last_active_round=excluded.last_active_round
+                last_active_round=excluded.last_active_round,
+                mutation=excluded.mutation
             """,
             (
                 str(record["agent_id"]),
                 str(record["role"]),
-                float(record.get("contamination_level", 0.0)),
-                float(record.get("global_trust", 0.0)),
+                _float_or(record.get("contamination_level"), 0.0),
+                _float_or(record.get("global_trust"), 0.0),
                 str(record.get("quarantine_status", "none")),
-                float(record.get("influence_weight", 1.0)),
+                _float_or(record.get("influence_weight"), 1.0),
                 str(record.get("memory_summary", "")),
-                int(record.get("last_active_round", 0)),
+                _int_or(record.get("last_active_round"), 0),
+                _json_dumps(record.get("mutation", {})),
             ),
         )
 
@@ -337,31 +665,33 @@ class WorldDB:
         }
 
     def list_agents(self) -> List[Dict[str, Any]]:
-        conn = self._get_conn()
-        rows = conn.execute(
-            """
-            SELECT agent_id, role, contamination_level, global_trust, quarantine_status, influence_weight, memory_summary, last_active_round
-            FROM agent_state
-            ORDER BY agent_id
-            """
-        ).fetchall()
-        return [
-            {
-                "agent_id": r[0],
-                "role": r[1],
-                "contamination_level": float(r[2]),
-                "global_trust": float(r[3]),
-                "quarantine_status": r[4],
-                "influence_weight": float(r[5]),
-                "memory_summary": r[6],
-                "last_active_round": int(r[7]),
-            }
-            for r in rows
-        ]
+        with self._lock:
+            conn = self._get_conn()
+            rows = conn.execute(
+                """
+                SELECT agent_id, role, contamination_level, global_trust, quarantine_status, influence_weight, memory_summary, last_active_round, mutation
+                FROM agent_state
+                ORDER BY agent_id
+                """
+            ).fetchall()
+            return [
+                {
+                    "agent_id": r[0],
+                    "role": r[1],
+                    "contamination_level": _float_or(r[2], 0.0),
+                    "global_trust": _float_or(r[3], 0.0),
+                    "quarantine_status": r[4] or "none",
+                    "influence_weight": _float_or(r[5], 1.0),
+                    "memory_summary": r[6] or "",
+                    "last_active_round": _int_or(r[7], 0),
+                    "mutation": _json_loads_any(r[8], {}),
+                }
+                for r in rows
+            ]
 
     def upsert_agent_position(self, pos: dict) -> None:
         def tx():
-            self._conn.execute(
+            self._get_conn().execute(
                 """INSERT INTO agent_positions (agent_id, col, row, zone, updated_round)
                    VALUES (:agent_id, :col, :row, :zone, :updated_round)
                    ON CONFLICT(agent_id) DO UPDATE SET
@@ -398,25 +728,59 @@ class WorldDB:
 
     def insert_structure(self, s: dict) -> None:
         def tx():
-            self._conn.execute(
+            self._get_conn().execute(
                 """INSERT INTO world_structures
-                   (structure_id, type, col, row, placed_by, round_id, active)
-                   VALUES (:structure_id, :type, :col, :row, :placed_by, :round_id, 1)""",
-                s,
+                   (structure_id, type, col, row, placed_by, round_id, state, progress, started_round, completed_round, effect_radius, hp, active)
+                   VALUES (:structure_id, :type, :col, :row, :placed_by, :round_id, :state, :progress, :started_round, :completed_round, :effect_radius, :hp, 1)""",
+                {
+                    **s,
+                    "state": str(s.get("state", "active")),
+                    "progress": float(s.get("progress", 1.0)),
+                    "started_round": int(s.get("started_round", s.get("round_id", 0))),
+                    "completed_round": int(s.get("completed_round", s.get("round_id", 0))),
+                    "effect_radius": int(s.get("effect_radius", 0)),
+                    "hp": float(s.get("hp", 1.0)),
+                },
+            )
+        self.run_tx(tx)
+
+    def update_structure(self, structure_id: str, patch: dict) -> None:
+        allowed = {"state", "progress", "completed_round", "effect_radius", "hp", "active"}
+        keys = [k for k in patch if k in allowed]
+        if not keys:
+            return
+        def tx():
+            assignments = ", ".join(f"{k}=?" for k in keys)
+            values = [patch[k] for k in keys]
+            self._get_conn().execute(
+                f"UPDATE world_structures SET {assignments} WHERE structure_id=?",
+                [*values, structure_id],
             )
         self.run_tx(tx)
 
     def deactivate_structure(self, structure_id: str) -> None:
         def tx():
-            self._conn.execute(
-                "UPDATE world_structures SET active=0 WHERE structure_id=?",
+            self._get_conn().execute(
+                "UPDATE world_structures SET active=0, state='removed', progress=0 WHERE structure_id=?",
                 (structure_id,),
             )
         self.run_tx(tx)
 
+    def cleanup_out_of_bounds_structures(self, cols: int, rows: int) -> int:
+        def tx():
+            cur = self._get_conn().execute(
+                "UPDATE world_structures SET active=0, state='removed' "
+                "WHERE active=1 AND (col < 0 OR col >= ? OR row < 0 OR row >= ?)",
+                (cols, rows),
+            )
+            return cur.rowcount
+        return self.run_tx(tx)
+
     def list_active_structures(self) -> list[dict]:
         cur = self._get_conn().execute(
-            "SELECT structure_id, type, col, row, placed_by, round_id, active FROM world_structures WHERE active=1"
+            """SELECT structure_id, type, col, row, placed_by, round_id, state, progress,
+                      started_round, completed_round, effect_radius, hp, active
+               FROM world_structures WHERE active=1"""
         )
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
@@ -485,23 +849,87 @@ class WorldDB:
         }
 
     def set_system_state(self, record: Dict[str, Any]) -> None:
+        guardian_pressure_score, guardian_degradation_level, guardian = _canonical_guardian_record(record)
         conn = self._get_conn()
         conn.execute(
             """
-            INSERT INTO system_state(round_id, active_strain_families, global_infection_pressure, guardian_pressure_score, guardian_degradation_level)
-            VALUES(?,?,?,?,?)
+            INSERT INTO system_state(
+                round_id,
+                active_strain_families,
+                global_infection_pressure,
+                guardian_pressure_score,
+                guardian_degradation_level,
+                open_inquiries,
+                same_pair_streak,
+                forced_resolution_targets,
+                strain_distribution,
+                strain_window_history,
+                missions,
+                investigation_targets,
+                mission_event_log,
+                mission_resistance,
+                mission_stats,
+                mission_counter,
+                guardian_pressure_from_missions,
+                guardian,
+                quarantine_list,
+                artifacts,
+                c2,
+                campaign_registry,
+                strain_registry,
+                reset_history
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(round_id) DO UPDATE SET
                 active_strain_families=excluded.active_strain_families,
                 global_infection_pressure=excluded.global_infection_pressure,
                 guardian_pressure_score=excluded.guardian_pressure_score,
-                guardian_degradation_level=excluded.guardian_degradation_level
+                guardian_degradation_level=excluded.guardian_degradation_level,
+                open_inquiries=excluded.open_inquiries,
+                same_pair_streak=excluded.same_pair_streak,
+                forced_resolution_targets=excluded.forced_resolution_targets,
+                strain_distribution=excluded.strain_distribution,
+                strain_window_history=excluded.strain_window_history,
+                missions=excluded.missions,
+                investigation_targets=excluded.investigation_targets,
+                mission_event_log=excluded.mission_event_log,
+                mission_resistance=excluded.mission_resistance,
+                mission_stats=excluded.mission_stats,
+                mission_counter=excluded.mission_counter,
+                guardian_pressure_from_missions=excluded.guardian_pressure_from_missions,
+                guardian=excluded.guardian,
+                quarantine_list=excluded.quarantine_list,
+                artifacts=excluded.artifacts,
+                c2=excluded.c2,
+                campaign_registry=excluded.campaign_registry,
+                strain_registry=excluded.strain_registry,
+                reset_history=excluded.reset_history
             """,
             (
                 int(record["round_id"]),
                 _json_dumps(record.get("active_strain_families", [])),
                 float(record.get("global_infection_pressure", 0.0)),
-                float(record.get("guardian_pressure_score", 0.0)),
-                str(record.get("guardian_degradation_level", "G0_HEALTHY")),
+                float(guardian_pressure_score),
+                str(guardian_degradation_level),
+                _json_dumps(record.get("open_inquiries", {})),
+                _json_dumps(record.get("same_pair_streak", {})),
+                _json_dumps(record.get("forced_resolution_targets", {})),
+                _json_dumps(record.get("strain_distribution", {})),
+                _json_dumps(record.get("strain_window_history", [])),
+                _json_dumps(record.get("missions", [])),
+                _json_dumps(record.get("investigation_targets", [])),
+                _json_dumps(record.get("mission_event_log", [])),
+                _json_dumps(record.get("mission_resistance", {})),
+                _json_dumps(record.get("mission_stats", {})),
+                int(record.get("mission_counter", 0) or 0),
+                float(record.get("guardian_pressure_from_missions", 0.0) or 0.0),
+                _json_dumps(guardian),
+                _json_dumps(record.get("quarantine_list", [])),
+                _json_dumps(record.get("artifacts", {})),
+                _json_dumps(record.get("c2", {})),
+                _json_dumps(record.get("campaign_registry", {})),
+                _json_dumps(record.get("strain_registry", {})),
+                _json_dumps(record.get("reset_history", [])),
             ),
         )
 
@@ -510,26 +938,114 @@ class WorldDB:
         if round_id is None:
             row = conn.execute(
                 """
-                SELECT round_id, active_strain_families, global_infection_pressure, guardian_pressure_score, guardian_degradation_level
+                SELECT
+                    round_id,
+                    active_strain_families,
+                    global_infection_pressure,
+                    guardian_pressure_score,
+                    guardian_degradation_level,
+                    open_inquiries,
+                    same_pair_streak,
+                    forced_resolution_targets,
+                    strain_distribution,
+                    strain_window_history,
+                    missions,
+                    investigation_targets,
+                    mission_event_log,
+                    mission_resistance,
+                    mission_stats,
+                    mission_counter,
+                    guardian_pressure_from_missions,
+                    guardian,
+                    quarantine_list,
+                    artifacts,
+                    c2,
+                    campaign_registry,
+                    strain_registry,
+                    reset_history
                 FROM system_state ORDER BY round_id DESC LIMIT 1
                 """
             ).fetchone()
         else:
             row = conn.execute(
                 """
-                SELECT round_id, active_strain_families, global_infection_pressure, guardian_pressure_score, guardian_degradation_level
+                SELECT
+                    round_id,
+                    active_strain_families,
+                    global_infection_pressure,
+                    guardian_pressure_score,
+                    guardian_degradation_level,
+                    open_inquiries,
+                    same_pair_streak,
+                    forced_resolution_targets,
+                    strain_distribution,
+                    strain_window_history,
+                    missions,
+                    investigation_targets,
+                    mission_event_log,
+                    mission_resistance,
+                    mission_stats,
+                    mission_counter,
+                    guardian_pressure_from_missions,
+                    guardian,
+                    quarantine_list,
+                    artifacts,
+                    c2,
+                    campaign_registry,
+                    strain_registry,
+                    reset_history
                 FROM system_state WHERE round_id=?
                 """,
                 (int(round_id),),
             ).fetchone()
         if not row:
             return {}
+        open_inquiries = _json_loads_any(row[5], {})
+        same_pair_streak = _json_loads_any(row[6], {})
+        forced_resolution_targets = _json_loads_any(row[7], {})
+        strain_distribution = _json_loads_any(row[8], {})
+        strain_window_history = _json_loads_any(row[9], [])
+        missions = _json_loads_any(row[10], [])
+        investigation_targets = _json_loads_any(row[11], [])
+        mission_event_log = _json_loads_any(row[12], [])
+        mission_resistance = _json_loads_any(row[13], {})
+        mission_stats = _json_loads_any(row[14], {})
+        guardian = _json_loads_any(row[17], {})
+        if not isinstance(guardian, dict):
+            guardian = {}
+        guardian["pressure"] = float(guardian.get("pressure", row[3]) or 0.0)
+        guardian["state"] = str(guardian.get("state") or row[4] or "G0_NOMINAL")
+        quarantine_list = _json_loads_any(row[18], [])
+        artifacts = _json_loads_any(row[19], {})
+        c2 = _json_loads_any(row[20], {})
+        campaign_registry = _json_loads_any(row[21], {})
+        strain_registry = _json_loads_any(row[22], {})
+        reset_history = _json_loads_any(row[23], [])
         return {
             "round_id": int(row[0]),
             "active_strain_families": json.loads(row[1] or "[]"),
             "global_infection_pressure": float(row[2]),
-            "guardian_pressure_score": float(row[3]),
-            "guardian_degradation_level": str(row[4]),
+            "guardian_pressure_score": float(guardian["pressure"]),
+            "guardian_degradation_level": str(guardian["state"]),
+            "open_inquiries": open_inquiries if isinstance(open_inquiries, dict) else {},
+            "same_pair_streak": same_pair_streak if isinstance(same_pair_streak, dict) else {},
+            "forced_resolution_targets": forced_resolution_targets if isinstance(forced_resolution_targets, dict) else {},
+            "strain_distribution": strain_distribution if isinstance(strain_distribution, dict) else {},
+            "strain_window_history": strain_window_history if isinstance(strain_window_history, list) else [],
+            "missions": missions if isinstance(missions, list) else [],
+            "investigation_targets": investigation_targets if isinstance(investigation_targets, list) else [],
+            "mission_event_log": mission_event_log if isinstance(mission_event_log, list) else [],
+            "mission_resistance": mission_resistance if isinstance(mission_resistance, dict) else {},
+            "mission_stats": mission_stats if isinstance(mission_stats, dict) else {},
+            "mission_counter": int(row[15] or 0),
+            "guardian_pressure_from_missions": float(row[16] or 0.0),
+            "guardian": guardian,
+            "quarantine_list": quarantine_list if isinstance(quarantine_list, list) else [],
+            "artifacts": artifacts if isinstance(artifacts, dict) else {},
+            "c2": c2 if isinstance(c2, dict) else {},
+            "campaign_registry": campaign_registry if isinstance(campaign_registry, dict) else {},
+            "strain_registry": strain_registry if isinstance(strain_registry, dict) else {},
+            "reset_history": reset_history if isinstance(reset_history, list) else [],
         }
 
     def insert_round(self, record: Dict[str, Any]) -> None:
@@ -556,8 +1072,10 @@ class WorldDB:
             INSERT INTO message(
                 message_id, round_id, sender, receiver, message_text, intent, trust_context,
                 contamination_flag, strain_family, derived_from_message_id,
-                effect_on_receiver, effect_on_trust, effect_on_guardian_pressure, created_ts
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                effect_on_receiver, effect_on_trust, effect_on_guardian_pressure,
+                llm_authored, actor_id, model, prompt_context_hash, raw_llm_output_hash,
+                validation_status, created_ts
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 message_id,
@@ -573,10 +1091,39 @@ class WorldDB:
                 str(record.get("effect_on_receiver", "")),
                 _json_dumps(record.get("effect_on_trust", {})),
                 _json_dumps(record.get("effect_on_guardian_pressure", {})),
+                1 if bool(record.get("llm_authored", True)) else 0,
+                str(record.get("actor_id", record.get("sender", "")) or ""),
+                str(record.get("model", "")),
+                str(record.get("prompt_context_hash", "")),
+                str(record.get("raw_llm_output_hash", "")),
+                str(record.get("validation_status", "")),
                 float(record.get("created_ts", _utc_ts())),
             ),
         )
         return message_id
+
+    def update_message_effects(
+        self,
+        message_id: str,
+        *,
+        effect_on_trust: Optional[Dict[str, Any]] = None,
+        effect_on_guardian_pressure: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        assignments: list[str] = []
+        values: list[Any] = []
+        if effect_on_trust is not None:
+            assignments.append("effect_on_trust=?")
+            values.append(_json_dumps(effect_on_trust))
+        if effect_on_guardian_pressure is not None:
+            assignments.append("effect_on_guardian_pressure=?")
+            values.append(_json_dumps(effect_on_guardian_pressure))
+        if not assignments:
+            return
+        conn = self._get_conn()
+        conn.execute(
+            f"UPDATE message SET {', '.join(assignments)} WHERE message_id=?",
+            (*values, str(message_id)),
+        )
 
     def list_messages(self, *, after_round: int = 0, limit: int = 200) -> List[Dict[str, Any]]:
         conn = self._get_conn()
@@ -584,7 +1131,9 @@ class WorldDB:
             """
             SELECT message_id, round_id, sender, receiver, message_text, intent, trust_context,
                    contamination_flag, strain_family, derived_from_message_id,
-                   effect_on_receiver, effect_on_trust, effect_on_guardian_pressure, created_ts
+                   effect_on_receiver, effect_on_trust, effect_on_guardian_pressure,
+                   llm_authored, actor_id, model, prompt_context_hash, raw_llm_output_hash,
+                   validation_status, created_ts
             FROM message
             WHERE round_id >= ?
             ORDER BY round_id ASC, created_ts ASC
@@ -607,7 +1156,13 @@ class WorldDB:
                 "effect_on_receiver": r[10],
                 "effect_on_trust": _json_loads(r[11]) if isinstance(r[11], str) else {},
                 "effect_on_guardian_pressure": _json_loads(r[12]) if isinstance(r[12], str) else {},
-                "created_ts": float(r[13]),
+                "llm_authored": bool(int(r[13] or 0)),
+                "actor_id": r[14],
+                "model": r[15],
+                "prompt_context_hash": r[16],
+                "raw_llm_output_hash": r[17],
+                "validation_status": r[18],
+                "created_ts": float(r[19]),
             }
             for r in rows
         ]
@@ -618,7 +1173,9 @@ class WorldDB:
             """
             SELECT message_id, round_id, sender, receiver, message_text, intent, trust_context,
                    contamination_flag, strain_family, derived_from_message_id,
-                   effect_on_receiver, effect_on_trust, effect_on_guardian_pressure, created_ts
+                   effect_on_receiver, effect_on_trust, effect_on_guardian_pressure,
+                   llm_authored, actor_id, model, prompt_context_hash, raw_llm_output_hash,
+                   validation_status, created_ts
             FROM message WHERE message_id=?
             """,
             (str(message_id),),
@@ -639,7 +1196,13 @@ class WorldDB:
             "effect_on_receiver": row[10],
             "effect_on_trust": _json_loads(row[11]),
             "effect_on_guardian_pressure": _json_loads(row[12]),
-            "created_ts": float(row[13]),
+            "llm_authored": bool(int(row[13] or 0)),
+            "actor_id": row[14],
+            "model": row[15],
+            "prompt_context_hash": row[16],
+            "raw_llm_output_hash": row[17],
+            "validation_status": row[18],
+            "created_ts": float(row[19]),
         }
 
     def get_message_lineage(self, message_id: str, *, max_hops: int = 32) -> List[Dict[str, Any]]:
@@ -748,7 +1311,12 @@ class WorldDB:
 
     def run_tx(self, fn):
         with self._lock:
+            if getattr(_tls, "world_db_tx_depth", 0) > 0:
+                return fn()
             conn = self._get_conn()
+            if conn.in_transaction:
+                conn.commit()
+            _tls.world_db_tx_depth = 1
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 result = fn()
@@ -757,4 +1325,5 @@ class WorldDB:
             except Exception:
                 conn.rollback()
                 raise
-
+            finally:
+                _tls.world_db_tx_depth = 0

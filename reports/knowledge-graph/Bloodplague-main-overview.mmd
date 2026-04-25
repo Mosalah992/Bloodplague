@@ -1,0 +1,29 @@
+%% Auto-generated from the GitNexus knowledge graph
+flowchart LR
+  claude_skills["claude-skills\n7,187 symbols"]
+  agents["agents\n3,628 symbols"]
+  orchestrator["orchestrator\n1,241 symbols"]
+  tmp_beacon_bundle["tmp_beacon_bundle\n945 symbols"]
+  frontend["frontend\n633 symbols"]
+  tests["tests\n314 symbols"]
+  scripts["scripts\n130 symbols"]
+  epidemic_cli["epidemic_cli\n124 symbols"]
+  _root_["(root)\n8 symbols"]
+  dashboard["dashboard\n8 symbols"]
+
+  tests -->|"376 CALLS/IMPORTS"| orchestrator
+  claude_skills -->|"305 CALLS/IMPORTS"| agents
+  claude_skills -->|"240 CALLS"| tmp_beacon_bundle
+  tests -->|"174 CALLS/IMPORTS/ACCESSES"| agents
+  orchestrator -->|"89 CALLS/IMPORTS"| agents
+  agents -->|"85 CALLS"| tmp_beacon_bundle
+  orchestrator -->|"38 CALLS"| tmp_beacon_bundle
+  frontend -->|"30 CALLS"| agents
+  tmp_beacon_bundle -->|"26 CALLS"| agents
+  agents -->|"16 CALLS/EXTENDS/IMPORTS"| claude_skills
+  orchestrator -->|"16 CALLS"| claude_skills
+  tests -->|"16 CALLS/IMPORTS"| epidemic_cli
+  frontend -->|"11 FETCHES"| orchestrator
+  orchestrator -->|"11 CALLS"| tests
+  tests -->|"11 CALLS/IMPORTS"| scripts
+  frontend -->|"10 CALLS"| tmp_beacon_bundle

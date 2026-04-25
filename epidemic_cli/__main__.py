@@ -35,7 +35,9 @@ def should_pause_on_exit(argv: list[str] | None = None) -> bool:
 
 def should_launch_control_center(argv: list[str] | None = None) -> bool:
     args = argv or list(sys.argv)
-    return bool(getattr(sys, "frozen", False) and len(args) <= 1)
+    if len(args) <= 1:
+        return True
+    return False
 
 
 def _pause_before_exit() -> None:

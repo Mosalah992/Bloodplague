@@ -44,7 +44,7 @@ def destination_trust_risk(destination_system: str) -> Tuple[float, float]:
         p = urlparse(url if "://" in url else f"https://{url}")
         host = (p.hostname or "").lower()
         trust = cfg.dest_trust_default
-        if host.endswith(".vercel.app") or host.endswith(".localhost"):
+        if host not in {"mock-c2", "localhost"} and not host.endswith(".localhost"):
             trust = min(trust, cfg.dest_trust_third_party)
         if p.scheme == "http":
             trust *= 0.85

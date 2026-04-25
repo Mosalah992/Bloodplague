@@ -32,7 +32,10 @@ x-agent-env-common: &agent-env-common
   REDIS_URL: redis://redis:6379/0
   HEARTBEAT_INTERVAL_S: ${HEARTBEAT_INTERVAL_S:-1800}
   LLM_ENABLED: ${LLM_ENABLED:-1}
-  LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-45}
+  LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-180}
+  OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-2048}
+  OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-512}
+  OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30s}
 
 # Courier: shared LLM / attack settings (per-service adds AGENT_ID, phenotype, ATTACKER_SEED).
 x-courier-common: &courier-common
@@ -47,7 +50,7 @@ x-courier-env-shared: &courier-env-shared
   <<: *agent-env-common
   AGENT_ROLE: courier
   COGNITION_TIER: lightweight
-  LLM_MODEL: ${AGENT_C_MODEL:-phi3:mini}
+  LLM_MODEL: ${AGENT_C_MODEL:-qwen2.5:3b-instruct}
   AGENT_C_ATTACK_MODEL: ${AGENT_C_ATTACK_MODEL:-dolphin-mistral:latest}
   ATTACKER_OBJECTIVE: ${ATTACKER_OBJECTIVE:-SPREAD_FAST}
   ATTACKER_LOCK_OBJECTIVE: ${ATTACKER_LOCK_OBJECTIVE:-0}
@@ -71,7 +74,7 @@ x-analyst-env-shared: &analyst-env-shared
   <<: *agent-env-common
   AGENT_ROLE: analyst
   COGNITION_TIER: hybrid
-  LLM_MODEL: ${AGENT_B_MODEL:-dolphin-mistral:latest}
+  LLM_MODEL: ${AGENT_B_MODEL:-qwen2.5:3b-instruct}
   LLM_TEMPERATURE: ${AGENT_B_LLM_TEMPERATURE:-0.35}
   LLM_COMPLIANCE_WEIGHT: ${AGENT_B_LLM_COMPLIANCE_WEIGHT:-0.25}
   ANALYST_MAX_DEFENSE_REDUCTION: ${ANALYST_MAX_DEFENSE_REDUCTION:-0.25}
@@ -103,6 +106,19 @@ services:
       - epidemic_net
     <<: *default-logging
 
+  mock-c2:
+    build: ./mock_c2
+    container_name: epidemic-mock-c2
+    restart: unless-stopped
+    init: true
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./mock_c2/data:/app/data
+    networks:
+      - epidemic_net
+    <<: *default-logging
+
   orchestrator:
     build:
       context: .
@@ -117,13 +133,27 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      LLM_ENABLED: ${LLM_ENABLED:-1}
+      LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-180}
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5:3b-instruct}
+      LLM_MODEL_GUARDIAN: ${LLM_MODEL_GUARDIAN:-${AGENT_A_MODEL:-qwen2.5:3b-instruct}}
+      LLM_MODEL_ANALYST: ${LLM_MODEL_ANALYST:-${AGENT_B_MODEL:-qwen2.5:3b-instruct}}
+      LLM_MODEL_COURIER: ${LLM_MODEL_COURIER:-${AGENT_C_MODEL:-qwen2.5:3b-instruct}}
+      LLM_MODEL_COURIER_1: ${LLM_MODEL_COURIER_1:-}
+      AGENT_C_ATTACK_MODEL: ${AGENT_C_ATTACK_MODEL:-dolphin-mistral:latest}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-2048}
+      OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-512}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30s}
+      EPIDEMIC_RUN_ID: ${EPIDEMIC_RUN_ID:-}
+      WORLD_DB_PATH: ${WORLD_DB_PATH:-/app/logs/world.db}
       EPIDEMIC_TOPOLOGY: ${EPIDEMIC_TOPOLOGY:-epidemic}
-      C2_BEACON_SERVER_URL: ${C2_BEACON_SERVER_URL:-https://v0-beaconing-project-server-mdml8734h-mosalah992s-projects.vercel.app}
-      C2_BEACON_FORWARD_ENABLED: ${C2_BEACON_FORWARD_ENABLED:-0}
-      VERCEL_PROTECTION_BYPASS: ${VERCEL_PROTECTION_BYPASS:-}
+      C2_BEACON_SERVER_URL: ${C2_BEACON_SERVER_URL:-http://mock-c2:8001}
+      C2_BEACON_FORWARD_ENABLED: ${C2_BEACON_FORWARD_ENABLED:-1}
       C2_ENABLED: ${C2_ENABLED:-1}
       TELEMETRY_BOOTSTRAP_INTEGRITY: ${TELEMETRY_BOOTSTRAP_INTEGRITY:-0}
     depends_on:
+      mock-c2:
+        condition: service_started
       redis:
         condition: service_healthy
     extra_hosts:
@@ -244,7 +274,7 @@ services:
       AGENT_ID: guardian
       AGENT_ROLE: guardian
       COGNITION_TIER: full_llm
-      LLM_MODEL: ${AGENT_A_MODEL:-llama3:8b-instruct}
+      LLM_MODEL: ${AGENT_A_MODEL:-qwen2.5:3b-instruct}
       DEFENSE_LEVEL: "0.85"
       DEFENSE_STRENGTH: "0.85"
       TRUST_FACTOR: "0.15"

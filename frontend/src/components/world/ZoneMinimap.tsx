@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { WORLD_COLS, WORLD_ROWS, WORLD_ZONES } from '../../pixel/constants.js';
+import { WORLD_COLS, WORLD_ROWS, WORLD_ZONES, ISO_ORIGIN_X, ISO_ORIGIN_Y, ISO_HALF_W, ISO_HALF_H } from '../../pixel/constants.js';
 import type { WorldState } from '../../pixel/world/worldState.js';
 import type { CameraState } from '../../pixel/world/worldCamera.js';
 
@@ -40,6 +40,20 @@ export default function ZoneMinimap({ state, camera, width = 160, height = 120 }
       ctx.fillRect(c * scaleX, r * scaleY, scaleX, scaleY);
     }
 
+    for (const s of state.structures) {
+      if (s.state === 'removed') continue;
+      ctx.fillStyle = s.type === 'quarantine_barrier'
+        ? '#ef4444'
+        : s.type === 'scan_relay_post'
+          ? '#22d3ee'
+          : s.type === 'corruption_beacon'
+            ? '#a3e635'
+            : '#94a3b8';
+      ctx.globalAlpha = s.state === 'constructing' ? 0.45 : 0.9;
+      ctx.fillRect(s.col * scaleX - 1, s.row * scaleY - 1, 3, 3);
+      ctx.globalAlpha = 1;
+    }
+
     for (const [id, pos] of state.agentPositions) {
       ctx.fillStyle = id === 'guardian' ? '#a78bfa' : id.startsWith('courier') ? '#fb923c' : '#4ade80';
       ctx.beginPath();
@@ -47,14 +61,21 @@ export default function ZoneMinimap({ state, camera, width = 160, height = 120 }
       ctx.fill();
     }
 
-    const tileSize = 16;
-    const vpX = (camera.x / tileSize) * scaleX;
-    const vpY = (camera.y / tileSize) * scaleY;
-    const vpW = (camera.viewportW / camera.zoom / tileSize) * scaleX;
-    const vpH = (camera.viewportH / camera.zoom / tileSize) * scaleY;
-    ctx.strokeStyle = '#ffffff44';
+    // Top-down: camera x/y are cartesian world px. Convert to cell coords.
+    const camCenterX = camera.x + camera.viewportW / (2 * camera.zoom);
+    const camCenterY = camera.y + camera.viewportH / (2 * camera.zoom);
+    const centerCol = (camCenterX - ISO_ORIGIN_X) / (2 * ISO_HALF_W);
+    const centerRow = (camCenterY - ISO_ORIGIN_Y) / (2 * ISO_HALF_H);
+    const cpx = centerCol * scaleX;
+    const cpy = centerRow * scaleY;
+    ctx.strokeStyle = '#ffffff66';
     ctx.lineWidth = 1;
-    ctx.strokeRect(vpX, vpY, vpW, vpH);
+    ctx.beginPath();
+    ctx.moveTo(cpx - 4, cpy);
+    ctx.lineTo(cpx + 4, cpy);
+    ctx.moveTo(cpx, cpy - 4);
+    ctx.lineTo(cpx, cpy + 4);
+    ctx.stroke();
   });
 
   return (

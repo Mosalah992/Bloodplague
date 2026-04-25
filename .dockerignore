@@ -32,6 +32,14 @@ siem_index_pretest.db
 *.sqlite
 *.sqlite3
 
+# --- Analysis / generated local tooling state ---
+.gitnexus
+reports
+coverage
+htmlcov
+.mypy_cache
+.ruff_cache
+
 # --- PyInstaller / local packaging ---
 build
 dist

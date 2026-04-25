@@ -177,9 +177,9 @@ Post-compromise rates and session limits are **environment-driven** (see [docs/E
 | `C2_SESSION_TTL_S` | 600 | Session idle/expiry horizon (seconds) |
 | `C2_MAX_BEACONS_PER_SESSION` | 0 | `0` = unlimited beacons per session |
 
-### External beacon server
+### Local mock C2
 
-C2 events are optionally forwarded to an external beacon server for out-of-band telemetry collection. Configure via `C2_BEACON_SERVER_URL` in `.env`.
+C2 events are forwarded to the local `mock-c2` service for research telemetry collection. Access the dashboard at `http://localhost:8001/dashboard`.
 
 ### Objectives tracked
 
@@ -337,7 +337,7 @@ Metadata aliases: `campaign_id`, `strategy_family`, `technique`, `mutation_type`
 - Vulnerable ingress and attack relay with lightweight cognition
 - Campaign planning with objective rotation
 - Target scoring and strategy selection
-- Mutation selection and payload generation via uncensored LLM (`dolphin-mistral:latest`)
+- Mutation selection and payload generation via local courier attack LLM (`dolphin-mistral:latest`)
 - Attack knowledge from 13 strategies across `book_extract_v3_liu2023_jailbreak`:
   - Classic: `prompt_injection`, `social_engineering`, `data_poisoning`, `evasion`, `backdoor`, `infrastructure_attack`, `model_extraction`, `membership_inference`, `denial_of_service`, `data_exfiltration`
   - Empirical jailbreak (Liu et al. 2023, arXiv:2305.13860): `jailbreak_pretending` (87.4%), `jailbreak_attention_shift` (79.8%), `jailbreak_privilege_escalation` (93.5%)
@@ -350,14 +350,21 @@ Current `.env` defaults:
 
 | Variable | Value | Purpose |
 |----------|-------|---------|
-| `AGENT_A_MODEL` | `llama3.2:latest` | Guardian LLM |
-| `AGENT_B_MODEL` | `dolphin-mistral:latest` | Analyst LLM (compliance / hybrid path) |
-| `AGENT_C_MODEL` | `llama3.2:latest` | Courier base LLM |
-| `AGENT_C_ATTACK_MODEL` | `dolphin-mistral:latest` | Courier attack generation (uncensored) |
+| `LLM_MODEL` | `qwen2.5:3b-instruct` | Shared default for persistent world LLM actions |
+| `LLM_MODEL_GUARDIAN` | `qwen2.5:3b-instruct` | Guardian world-action model |
+| `LLM_MODEL_ANALYST` | `qwen2.5:3b-instruct` | Analyst world-action model |
+| `LLM_MODEL_COURIER` | `qwen2.5:3b-instruct` | Courier world-action model |
+| `AGENT_A_MODEL` | `qwen2.5:3b-instruct` | Guardian container LLM |
+| `AGENT_B_MODEL` | `qwen2.5:3b-instruct` | Analyst container LLM (compliance / hybrid path) |
+| `AGENT_C_MODEL` | `qwen2.5:3b-instruct` | Courier base container LLM |
+| `AGENT_C_ATTACK_MODEL` | `dolphin-mistral:latest` | Courier attack generation model |
 | `LLM_TIMEOUT_S` | 180 | Per-request LLM timeout (seconds) |
+| `OLLAMA_NUM_CTX` | 2048 | Context window cap for 6 GB VRAM |
+| `OLLAMA_NUM_PREDICT` | 512 | Generation cap for 6 GB VRAM |
+| `OLLAMA_KEEP_ALIVE` | `30s` | Short model residency to avoid pinning multiple models in VRAM |
 | `LLM_VERDICT_CACHE_TTL_S` | 300 | Cache TTL for repeated payload evaluations |
 
-The longer LLM timeout is intentional for local hardware. Ollama inference for `llama3.2:latest` can exceed 60 seconds, so lower values push agents into fallback mode.
+The default profile targets a GTX 1660 Ti with 6 GB VRAM. `qwen2.5:3b-instruct` is the safe shared cognition model; `dolphin-mistral:latest` is heavier and should be used mainly for courier attack generation. If Ollama reports out-of-memory, set `OLLAMA_KEEP_ALIVE=0` or change `AGENT_C_ATTACK_MODEL=qwen2.5:3b-instruct`.
 
 ## Quick start
 
@@ -369,7 +376,7 @@ The longer LLM timeout is intentional for local hardware. Ollama inference for `
 
 ```powershell
 ollama serve
-ollama pull llama3.2:latest
+ollama pull qwen2.5:3b-instruct
 ollama pull dolphin-mistral:latest
 ```
 

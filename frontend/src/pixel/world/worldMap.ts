@@ -17,11 +17,19 @@ function buildMaps(): void {
     _zoneMap.push(new Array(WORLD_COLS).fill('hub') as ZoneId[]);
   }
 
+  const ZONE_FLOORS: Record<ZoneId, number> = {
+    hub: TileType.FLOOR_1,
+    analyst_bay: TileType.FLOOR_2,
+    courier_zone: TileType.FLOOR_3,
+    guardian_fortress: TileType.FLOOR_4,
+    quarantine_block: TileType.FLOOR_5,
+  };
+
   for (const zone of WORLD_ZONES) {
     for (let r = zone.rowMin; r <= zone.rowMax; r++) {
       for (let c = zone.colMin; c <= zone.colMax; c++) {
         _zoneMap[r][c] = zone.id;
-        _tileMap[r][c] = TileType.FLOOR_1;
+        _tileMap[r][c] = ZONE_FLOORS[zone.id] ?? TileType.FLOOR_1;
       }
     }
   }
@@ -38,14 +46,14 @@ function buildMaps(): void {
     }
   }
 
-  // Open doorways (3-tile gaps)
+  // Open doorways (2-tile gaps at zone boundaries)
   const openings: [number, number][] = [
-    [19, 10], [19, 11], [19, 12],
-    [10, 40], [11, 40], [12, 40],
-    [55, 8],  [55, 9],  [55, 10],
-    [40, 20], [41, 20], [42, 20],
-    [55, 24], [56, 24], [57, 24],
-    [40, 40], [41, 40], [42, 40],
+    [6, 3], [6, 4], [7, 3], [7, 4],        // hub ↔ analyst_bay
+    [3,10], [4,10], [3,11], [4,11],        // hub ↔ guardian_fortress
+    [18,3], [18,4], [19,3], [19,4],        // analyst_bay ↔ courier_zone
+    [14,5], [15,5], [14,6], [15,6],        // analyst_bay ↔ quarantine_block
+    [18,6], [19,6], [18,7], [19,7],        // courier_zone ↔ quarantine_block
+    [14,10], [15,10], [14,11], [15,11],    // quarantine_block ↔ guardian_fortress
   ];
   for (const [c, r] of openings) {
     if (r >= 0 && r < WORLD_ROWS && c >= 0 && c < WORLD_COLS) {

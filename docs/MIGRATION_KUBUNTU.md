@@ -17,7 +17,7 @@ painful or impossible.
       `git status` and confirm the working tree is clean. If anything is
       uncommitted, commit and push it before going further.
 - [ ] **Back up `.env`** to an external drive or password manager. It contains
-      Vercel deployment-protection bypass tokens that are NOT in git (the
+      local deployment-protection bypass tokens that are NOT in git (the
       `.env.example` template only has empty placeholders).
 - [ ] **Back up local logs.** The `logs/` directory holds ~4.4 GB of soak-run
       telemetry that is gitignored. Copy it to an external drive if you want
@@ -40,7 +40,7 @@ painful or impossible.
       ```bash
       cp -r "/c/Users/bluem/.ollama/models" /path/to/backup/ollama-models
       ```
-- [ ] **Note your Vercel C2 server URL and bypass tokens** somewhere outside
+- [ ] **Note your local C2 server URL and bypass tokens** somewhere outside
       `.env` — you will need them when restoring `.env` on Kubuntu.
 - [ ] **In Windows: disable Fast Startup.** Control Panel → Power Options →
       "Choose what the power buttons do" → uncheck "Turn on fast startup".
@@ -251,7 +251,7 @@ this is why.
 
       # OR from template:
       cp .env.example .env
-      nano .env   # fill in VERCEL_PROTECTION_BYPASS, VERCEL_AUTOMATION_BYPASS_SECRET, C2_BEACON_SERVER_URL
+      nano .env   # fill in local_PROTECTION_BYPASS, local_AUTOMATION_BYPASS_SECRET, C2_BEACON_SERVER_URL
       ```
 - [ ] Restore `logs/` from backup if you want historical soak data:
       ```bash
@@ -317,7 +317,7 @@ external resources).
 - `user_profile.md` — hardware, role, preferences, Linux experience
 - `project_epidemic_lab.md` — architecture, strain model, CLAUDE.md rules
 - `feedback_collaboration_style.md` — how Mo wants the assistant to work
-- `reference_external_resources.md` — GitHub repo, submodules, Vercel C2
+- `reference_external_resources.md` — GitHub repo, submodules, local C2
 
 **Honest caveat:** even with memory restored, model weights do not carry
 conversation state. Each new session starts blank except for what is loaded

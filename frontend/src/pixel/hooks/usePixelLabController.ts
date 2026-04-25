@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { loadPixelAssets } from '../assets/loadPixelAssets.js';
+import type { DashboardState } from '../epidemicAdapter.js';
 import { EpidemicAdapter } from '../epidemicAdapter.js';
 import { registerPixelHostHandler } from '../host/pixelHostBridge.js';
 import { getPixelAgentSpecByNumericId } from '../identity.js';
@@ -123,7 +124,7 @@ export function usePixelLabController(controlState: unknown) {
 
   useEffect(() => {
     if (!ready) return;
-    adapterRef.current?.syncSnapshot(controlState as Record<string, unknown>);
+    adapterRef.current?.syncSnapshot(controlState as DashboardState | null | undefined);
   }, [controlState, ready]);
 
   useEffect(() => {

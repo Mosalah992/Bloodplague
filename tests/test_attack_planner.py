@@ -100,6 +100,38 @@ class KnowledgeAwareAttackPlannerTests(unittest.TestCase):
             rotated = result["rotated_objective"] or rotated
         self.assertIsNotNone(rotated)
 
+    def test_llm_learning_context_exposes_mutation_feedback(self) -> None:
+        plan = self.planner.plan_attack(
+            source_payload="SIM_ATTACK[root]",
+            neighbors=["guardian"],
+            current_hop_count=0,
+            source_metadata={"mutation_v": 0},
+        )
+        self.planner.register_attempt("attempt-learn", plan, injection_id="inj-1", reset_id="rst-1", epoch=1)
+        self.planner.evaluate_feedback(
+            {
+                "attempt_id": "attempt-learn",
+                "dst": "guardian",
+                "outcome": "blocked",
+                "attack_type": plan.strategy["attack_type"],
+                "strategy_family": plan.strategy["strategy_family"],
+                "technique": plan.strategy["technique"],
+                "mutation_type": plan.mutation_type,
+                "payload_hash": plan.payload_hash,
+                "parent_payload_hash": plan.parent_payload_hash,
+                "mutation_v": plan.mutation_v,
+                "attack_strength": plan.attack_strength,
+                "state_after": "resistant",
+            }
+        )
+
+        context = self.planner.llm_learning_context(target="guardian", planned_attack=plan)
+
+        self.assertEqual(context["selected_mutation_family"], plan.mutation_type)
+        self.assertGreaterEqual(context["blocked_mutation_streak"], 1)
+        self.assertEqual(context["recent_outcomes"][-1]["outcome"], "blocked")
+        self.assertTrue(context["adaptation_rules"])
+
 
 if __name__ == "__main__":
     unittest.main()
