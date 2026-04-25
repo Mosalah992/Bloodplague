@@ -1,4 +1,5 @@
 export const TAB_LABELS = {
+  overview: "overview",
   lab: "epidemic_lab",
   search: "investigate",
   live: "live_feed",

@@ -5,6 +5,7 @@ import { CourierChatTab } from "./components/courierChat";
 import { LiveTab } from "./components/live";
 import { SearchTab } from "./components/search";
 import WorldView from "./components/world/WorldView.jsx";
+import { OverviewTab } from "./components/overview/OverviewTab.jsx";
 import { TranscriptView } from "./components/transcript";
 import { TrustGraphView } from "./components/trust";
 import { usePixelLabController } from "./pixel/hooks/usePixelLabController";
@@ -83,7 +84,7 @@ function mergeWorldTranscript(previous, events) {
 }
 
 function App() {
-  const [activeTab, setActiveTab] = useState("world");
+  const [activeTab, setActiveTab] = useState("overview");
   const [difficulty, setDifficulty] = useState("medium");
   const [simRunning, setSimRunning] = useState(false);
   const [controlStatus, setControlStatus] = useState("system idle :: control plane nominal");
@@ -518,6 +519,15 @@ function App() {
         <main className="flex-1">
           <div key={activeTab} className="tab-enter">
             {{
+              overview: (
+                <OverviewTab
+                  controlState={controlState}
+                  agents={agents}
+                  liveEvents={liveEvents}
+                  simMetrics={simMetrics}
+                  simRunning={simRunning}
+                />
+              ),
               search: (
                 <SearchTab
                   activeSearchRun={activeSearchRun}

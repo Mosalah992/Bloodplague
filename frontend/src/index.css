@@ -87,6 +87,23 @@ body {
   animation: fadeSlide 240ms ease-out;
 }
 
+/* Overview tab animations */
+@keyframes pdotPulse {
+  0%, 100% { box-shadow: 0 0 3px rgba(74, 222, 128, 0.6); transform: scale(1); }
+  50%       { box-shadow: 0 0 10px rgba(74, 222, 128, 0.95); transform: scale(1.15); }
+}
+@keyframes ovBarFlow {
+  0%   { transform: translateX(-50%); }
+  100% { transform: translateX(50%); }
+}
+@keyframes ovRowIn {
+  0%   { opacity: 0; transform: translateX(-8px); filter: blur(4px); }
+  100% { opacity: 1; transform: translateX(0);    filter: blur(0); }
+}
+.ov-bar-flow {
+  animation: ovBarFlow 4s linear infinite;
+}
+
 .severity-dim {
   opacity: 0.4;
 }
