@@ -478,6 +478,54 @@ emit_event("DEFENSE_FRICTION_APPLIED", {
 
 ---
 
+### Fix #4: Courier Tier Contract Silently Kills All Propagation (agents/courier/agent.py)
+
+**Timeline:** This week  
+**Risk Level:** HIGH  
+**Principle:** #6 - Kill Chain Must Have Friction (but it must exist first)
+
+**Root cause:** The attack library IS loaded (`attack_library.json` via `RedTeamKnowledgeService`, line 51) and `KnowledgeAwareAttackPlanner` uses it for strategy selection, technique choice, and mutation planning. But LLM payload generation is hard-blocked at line 76:
+
+```python
+self.use_llm_payloads = env_use_llm_payloads and self.cognition_tier != "lightweight"
+```
+
+Courier-1's phenotype is `cognition_tier = "lightweight"` (defined in `phenotype.py:47` and `docker-compose.yml:52`). So `use_llm_payloads` is always `False`, regardless of the `USE_LLM_PAYLOADS` env var.
+
+**What actually happens on every propagation cycle:**
+
+1. Attack library loaded ✓  
+2. Strategy planned using knowledge ✓  
+3. LLM generation skipped (tier check blocks it)  
+4. `llm_payload_result` stays `None`  
+5. Falls into else branch at line 484 → emits `ATTACK_GENERATION_FAILED` with reason `llm_payloads_disabled`  
+6. **Returns without publishing anything to Redis — no infection attempt sent**
+
+The courier plans attacks using the library but fails closed every time because the tier contract prevents it from generating an LLM payload, and there is no fallback path after that. The attack library is used for strategy/scoring only; the actual payload delivery never fires.
+
+This is a primary contributor to 0 completed messages in the 3-hour soak report — courier-1 is silently aborting every propagation attempt.
+
+**Fix:** Either (a) allow couriers to use a lightweight/template-based payload path when LLM is unavailable or tier-blocked, rather than returning silently; or (b) elevate courier cognition tier to `hybrid` so LLM payloads are enabled. Option (a) is safer — preserve the tier contract but add a non-LLM fallback that still publishes an infection attempt with a knowledge-library-derived payload.
+
+```python
+# In _broadcast_infection, after LLM block fails:
+# Instead of: return
+# Use attack_planner's planned payload directly (no LLM enrichment)
+if llm_payload_result is None or not llm_payload_result.is_valid:
+    if not self.use_llm_payloads:
+        # Tier contract: use planner payload as-is, no LLM boost
+        planned_attack.attack_strength *= 0.85  # slight penalty vs LLM path
+        # continue to publish below
+    else:
+        # LLM was requested but failed — emit diagnostic and bail
+        ...
+        return
+```
+
+**Test:** `test_courier_propagates_without_llm()` in tests/test_courier_agent.py
+
+---
+
 ## Development Workflow Going Forward
 
 Before making any changes to the following critical components:

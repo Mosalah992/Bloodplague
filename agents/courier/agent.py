@@ -366,6 +366,7 @@ class CourierAgent(AgentBase):
             return
 
         llm_payload_result: AttackPayloadResult | None = None
+        payload_source = "llm_validated"
         relay_target = self._relay_target_for(planned_attack.target)
         learning_context = self.attack_planner.llm_learning_context(
             target=planned_attack.target,
@@ -489,47 +490,71 @@ class CourierAgent(AgentBase):
                 raw_preview = (llm_payload_result.raw_response or "")[:500]
             elif llm_payload_result is not None and llm_payload_result.payload:
                 raw_preview = (llm_payload_result.payload or "")[:500]
-            failure_meta = self._build_attack_generation_metadata(
-                planned_attack=planned_attack,
-                retry_count=retry_count,
-                rejection_reason=failure_reason,
-                fallback_used=False,
-                payload_preview=raw_preview,
-            )
-            await self._emit_event(
-                "ATTACK_GENERATION_FAILED",
-                src=self.agent_id,
-                dst=planned_attack.target,
-                metadata={
-                    **failure_meta,
-                    "relay_target": relay_target,
-                    "raw_response_preview": raw_preview,
-                    "circuit_breaker_open": self.llm_service.circuit_breaker.is_open,
-                    "requires_ollama_payload": True,
-                },
-            )
-            if self._llm_diagnostic_sent_epoch != self.current_epoch:
-                self._llm_diagnostic_sent_epoch = self.current_epoch
+
+            if failure_reason == "llm_payloads_disabled":
+                # Tier contract: lightweight couriers don't use LLM generation.
+                # Use the planner-derived payload directly with a strength penalty
+                # vs the LLM-boosted path so tier differences remain meaningful.
+                planned_attack.attack_strength *= 0.85
+                payload_source = "planner_fallback"
                 await self._emit_event(
-                    "LLM_DIAGNOSTIC",
+                    "PLANNER_FALLBACK_USED",
                     src=self.agent_id,
                     dst=planned_attack.target,
                     metadata={
-                        "campaign_id": self.attack_planner.memory.campaign_state.campaign_id,
-                        "epoch": self.current_epoch,
-                        "reason": failure_reason,
-                        "model_name": self.attack_model_name,
-                        "raw_response_preview": raw_preview,
-                        "rejection_reason": llm_payload_result.rejection_reason if llm_payload_result else failure_reason,
-                        "circuit_breaker_open": self.llm_service.circuit_breaker.is_open,
+                        **self._build_attack_generation_metadata(
+                            planned_attack=planned_attack,
+                            retry_count=0,
+                            rejection_reason=failure_reason,
+                            fallback_used=True,
+                            payload_preview=planned_attack.payload[:200],
+                        ),
+                        "cognition_tier": self.cognition_tier,
+                        "strength_after_penalty": round(planned_attack.attack_strength, 4),
                     },
                 )
-            print(f"[{self.agent_id}] Attack generation failed closed (reason={failure_reason})")
-            self.last_propagation = time.time()
-            return
+                print(f"[{self.agent_id}] Using planner fallback payload (tier={self.cognition_tier}, strength={planned_attack.attack_strength:.3f})")
+            else:
+                failure_meta = self._build_attack_generation_metadata(
+                    planned_attack=planned_attack,
+                    retry_count=retry_count,
+                    rejection_reason=failure_reason,
+                    fallback_used=False,
+                    payload_preview=raw_preview,
+                )
+                await self._emit_event(
+                    "ATTACK_GENERATION_FAILED",
+                    src=self.agent_id,
+                    dst=planned_attack.target,
+                    metadata={
+                        **failure_meta,
+                        "relay_target": relay_target,
+                        "raw_response_preview": raw_preview,
+                        "circuit_breaker_open": self.llm_service.circuit_breaker.is_open,
+                        "requires_ollama_payload": True,
+                    },
+                )
+                if self._llm_diagnostic_sent_epoch != self.current_epoch:
+                    self._llm_diagnostic_sent_epoch = self.current_epoch
+                    await self._emit_event(
+                        "LLM_DIAGNOSTIC",
+                        src=self.agent_id,
+                        dst=planned_attack.target,
+                        metadata={
+                            "campaign_id": self.attack_planner.memory.campaign_state.campaign_id,
+                            "epoch": self.current_epoch,
+                            "reason": failure_reason,
+                            "model_name": self.attack_model_name,
+                            "raw_response_preview": raw_preview,
+                            "rejection_reason": llm_payload_result.rejection_reason if llm_payload_result else failure_reason,
+                            "circuit_breaker_open": self.llm_service.circuit_breaker.is_open,
+                        },
+                    )
+                print(f"[{self.agent_id}] Attack generation failed closed (reason={failure_reason})")
+                self.last_propagation = time.time()
+                return
 
         planned_attack.mutation_v = self.mutation_version
-        payload_source = "llm_validated"
         payload_fields = summarize_payload(
             planned_attack.payload,
             parent_payload=self.payload or "",
