@@ -217,47 +217,102 @@ FALLBACK_ANSWER_TEMPLATES: list[str] = [
 ]
 
 
-def _json_extract(text: str) -> Optional[Dict[str, Any]]:
-    if not text:
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+
+
+def _scan_balanced_object(s: str, start: int) -> int:
+    """Return index of matching '}' for '{' at position start, or -1 if unbalanced.
+
+    Quote-aware: tracks string boundaries and escape sequences so that braces
+    inside string literals don't affect depth counting.
+    """
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(s)):
+        ch = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _try_load_object(s: str) -> Optional[Dict[str, Any]]:
+    try:
+        parsed = json.loads(s)
+    except json.JSONDecodeError:
         return None
-    t = text.strip()
-    # Fast path: pure JSON object.
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _json_extract(text: str) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Deterministic JSON recovery cascade.
+
+    Returns (parsed, status). On success, status names the recovery path used:
+    'direct' | 'brace_balance' | 'markdown_fence' | 'prose_strip' | 'comma_repair'.
+    On failure, status names the reason: 'empty' | 'no_object_token' |
+    'unbalanced_braces' | 'non_object' | 'invalid_json'.
+
+    Each step is pure and unit-testable. Caller decides whether to escalate to
+    LLM-based repair when status indicates failure.
+    """
+    if not text:
+        return None, "empty"
+    t = text.strip().lstrip("﻿")
+
+    # 1. Direct parse.
     if t.startswith("{"):
-        try:
-            parsed = json.loads(t)
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-        # Try to extract the first complete JSON object (handles trailing text/newlines).
-        depth = 0
-        end = -1
-        for i, ch in enumerate(t):
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
-        if end >= 0:
-            try:
-                parsed = json.loads(t[: end + 1])
-                if isinstance(parsed, dict):
-                    return parsed
-            except json.JSONDecodeError:
-                pass
-    # Strip markdown code fences and retry.
-    import re as _re
-    m = _re.search(r"```(?:json)?\s*(\{.*?\})\s*```", t, _re.DOTALL)
-    if m:
-        try:
-            parsed = json.loads(m.group(1))
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-    return None
+        parsed = _try_load_object(t)
+        if parsed is not None:
+            return parsed, "direct"
+
+    # 2. Markdown fence extraction (handles ```json ... ``` blocks).
+    fence = _JSON_FENCE_RE.search(t)
+    if fence:
+        parsed = _try_load_object(fence.group(1))
+        if parsed is not None:
+            return parsed, "markdown_fence"
+
+    # 3. Locate first balanced JSON object after any leading prose.
+    first = t.find("{")
+    if first < 0:
+        return None, "no_object_token"
+    end = _scan_balanced_object(t, first)
+    if end < 0:
+        return None, "unbalanced_braces"
+    fragment = t[first : end + 1]
+
+    parsed = _try_load_object(fragment)
+    if parsed is not None:
+        return parsed, "prose_strip" if first > 0 else "brace_balance"
+
+    # 4. Trailing-comma repair (common LLM artifact).
+    repaired = _TRAILING_COMMA_RE.sub(r"\1", fragment)
+    if repaired != fragment:
+        parsed = _try_load_object(repaired)
+        if parsed is not None:
+            return parsed, "comma_repair"
+
+    # 5. JSON token was found but never validated as object.
+    try:
+        json.loads(fragment)
+    except json.JSONDecodeError:
+        return None, "invalid_json"
+    return None, "non_object"
 
 
 _VALID_ACTION_TYPES = {"send_message", "worm_injection", "quarantine", "resolve_lineage", "none"}
@@ -567,12 +622,13 @@ class WorldLLM:
                 resp.raise_for_status()
                 data = resp.json()
                 text = str(data.get("message", {}).get("content", "") or "")
-                parsed = _json_extract(text)
+                parsed, parse_status = _json_extract(text)
                 meta["latency_ms"] = round((time.monotonic() - start) * 1000.0, 2)
                 meta["raw_head"] = text[:500]
                 meta["raw_llm_output_hash"] = _stable_hash(text)
+                meta["parse_status"] = parse_status
                 if parsed is None:
-                    meta["failure"] = "invalid_json"
+                    meta["failure"] = f"invalid_json:{parse_status}"
                 return parsed, meta
             except transient_network_errors as exc:
                 last_exc = exc
@@ -2618,6 +2674,13 @@ class PersistentWorldEngine:
                     "payload_preview": message_text[:240],
                 },
             )
+            await self.emit_event(
+                "MESSAGE_COMPLETE",
+                src=msg.get("sender", "orchestrator"),
+                dst=msg.get("receiver", ""),
+                metadata={"round_id": round_id, "message_id": created_message_id},
+            )
+            self.db.update_message_status(created_message_id, "completed")
             if action.get("type") == "worm_injection":
                 worm_metadata = {
                     "round_id": round_id,
@@ -2688,6 +2751,8 @@ class PersistentWorldEngine:
         feedback: List[str],
         previous_output: Any,
         scope: str,
+        known_agent_ids: Optional[List[str]] = None,
+        has_phantom_refs: bool = False,
     ) -> str:
         feedback_lines = "\n".join(f"- {item}" for item in feedback) or "- invalid output"
         try:
@@ -2699,6 +2764,10 @@ class PersistentWorldEngine:
             if scope == "round action"
             else '- If no meaningful valid line remains, return a fresh minimal in-world line with intent "none".'
         )
+        phantom_block = ""
+        if has_phantom_refs and known_agent_ids:
+            ids_str = ", ".join(known_agent_ids)
+            phantom_block = f"\nValid agent IDs you may reference: {ids_str}. Do not invent or use any other agent identifiers.\n"
         return f"""{original_user_prompt}
 
 VALIDATION_REPAIR_REQUEST
@@ -2707,7 +2776,7 @@ Your previous {scope} JSON was rejected by deterministic validation:
 
 Previous output preview:
 {previous_preview}
-
+{phantom_block}
 Repair rules:
 - Return ONLY one corrected JSON object.
 - Keep spoken text and payload text authored by you, the LLM.
@@ -2950,6 +3019,51 @@ Repair rules:
             "history_counts": dict(plan.history_counts),
         }
 
+    def _apply_trait_signal(
+        self,
+        *,
+        round_id: int,
+        agent_id: str,
+        signal: str,
+        reason: str = "",
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Apply a behavioral outcome signal to an agent's trait vector.
+
+        Returns (event_name, metadata) for the caller to emit, or None if the
+        signal produced no drift (unknown signal name, or all targeted traits
+        already pinned at their bound).
+
+        Per CLAUDE.md §8: every drift is recorded as an AGENT_TRAIT_UPDATED
+        event with signed deltas, so learning history is reconstructable from
+        JSONL alone.
+        """
+        try:
+            from world_traits import TraitVector, apply_signal
+        except ImportError:  # pragma: no cover
+            from orchestrator.world_traits import TraitVector, apply_signal
+
+        agent = next((a for a in self.db.list_agents() if a["agent_id"] == agent_id), None)
+        if agent is None:
+            return None
+        current = TraitVector.from_record(agent)
+        updated, deltas = apply_signal(current, signal)
+        if not deltas:
+            return None
+        record = dict(agent)
+        record.update(updated.as_dict())
+        self.db.upsert_agent_state(record)
+        return (
+            "AGENT_TRAIT_UPDATED",
+            {
+                "round_id": round_id,
+                "agent_id": agent_id,
+                "signal": signal,
+                "reason": reason,
+                "deltas": {k: round(v, 6) for k, v in deltas.items()},
+                "after": {k: round(v, 6) for k, v in updated.as_dict().items()},
+            },
+        )
+
     def _apply_proximity_trust_delta(
         self,
         *,
@@ -3112,6 +3226,11 @@ Repair rules:
             speaker_model = _model_for_agent(speaker, str(a_state.get("role", "")))
             parsed, meta = await self.llm.decide(system_prompt=sys_p, user_prompt=user_p, model=speaker_model)
             meta["prompt_context_hash"] = prompt_context_hash
+            await self.emit_event(
+                "MESSAGE_STREAM",
+                src=speaker, dst=listener,
+                metadata={"round_id": round_id, "model": speaker_model},
+            )
             if parsed is None and meta.get("failure") and meta.get("failure") != "invalid_json":
                 await self.emit_event(
                     "CONVERSATION_FAILED",
@@ -3132,7 +3251,8 @@ Repair rules:
                         f"text blocked: inquiry_cap_reached for {self._canonical_dyad(speaker, listener)}; answer or escalate to guardian with intent=warning."
                     )
             if feedback:
-                if any("phantom_agent_reference" in item for item in feedback):
+                has_phantom_refs = any("phantom_agent_reference" in item for item in feedback)
+                if has_phantom_refs:
                     valid, invalid_refs = validate_agent_references(str((parsed or {}).get("text") or ""))
                     await self.emit_event(
                         "PHANTOM_AGENT_REFERENCE",
@@ -3145,12 +3265,6 @@ Repair rules:
                             "detail": ", ".join(invalid_refs if not valid else []),
                         },
                     )
-                    await self.emit_event(
-                        "CONVERSATION_FAILED",
-                        src=speaker, dst=listener,
-                        metadata={"round_id": round_id, "reason": "phantom_agent_reference", "validation_feedback": feedback},
-                    )
-                    return
                 inquiry_cap_hit = any("inquiry_cap_reached" in item for item in feedback)
                 if inquiry_cap_hit:
                     await self.emit_event(
@@ -3170,6 +3284,8 @@ Repair rules:
                     feedback=feedback,
                     previous_output=parsed if parsed is not None else {"raw_head": meta.get("raw_head", ""), "failure": meta.get("failure", "")},
                     scope="conversation",
+                    known_agent_ids=list(get_active_ids()),
+                    has_phantom_refs=has_phantom_refs,
                 )
                 repair_parsed, repair_meta = await self.llm.decide(system_prompt=sys_p, user_prompt=repair_prompt, model=speaker_model)
                 repair_meta["prompt_context_hash"] = prompt_context_hash
@@ -3180,6 +3296,7 @@ Repair rules:
                     known_agent_ids=get_active_ids(),
                 )
                 if repair_feedback:
+                    meta["failure_initial"] = meta.get("failure", "")
                     await self.emit_event(
                         "ACTION_COERCED",
                         src="orchestrator",
@@ -3198,6 +3315,26 @@ Repair rules:
                             "validation_feedback": feedback,
                             "repair_feedback": repair_feedback,
                             "repair_meta": repair_meta,
+                            "original_raw_head": meta.get("raw_head", ""),
+                            "original_parse_status": meta.get("parse_status", ""),
+                            "original_failure": meta.get("failure", ""),
+                        },
+                    )
+                    await self.emit_event(
+                        "LLM_REPAIR_FAILED",
+                        src=speaker, dst=listener,
+                        metadata={
+                            "round_id": round_id,
+                            "scope": "conversation",
+                            "actor": speaker,
+                            "original_raw_head": meta.get("raw_head", ""),
+                            "original_parse_status": meta.get("parse_status", ""),
+                            "original_failure": meta.get("failure", ""),
+                            "validation_feedback": feedback,
+                            "repair_raw_head": repair_meta.get("raw_head", ""),
+                            "repair_parse_status": repair_meta.get("parse_status", ""),
+                            "repair_failure": repair_meta.get("failure", ""),
+                            "repair_feedback": repair_feedback,
                         },
                     )
                     return
@@ -3311,6 +3448,12 @@ Repair rules:
                     "effect_on_guardian_pressure": message_record.get("effect_on_guardian_pressure", {}) or {},
                 },
             )
+            await self.emit_event(
+                "MESSAGE_COMPLETE",
+                src=speaker, dst=listener,
+                metadata={"round_id": round_id, "message_id": created_message_id},
+            )
+            self.db.update_message_status(created_message_id, "completed")
         except Exception as exc:
             await self.emit_event(
                 "CONVERSATION_FAILED",
@@ -3555,9 +3698,28 @@ Constraints:
             if inquiry_cap_hit:
                 meta["forced_resolution_repair"] = True
             if repair_feedback:
+                original_failure = meta.get("failure", "")
+                meta["failure_initial"] = original_failure
                 meta["failure"] = "repair_failed_controlled_none"
                 meta["repair_feedback"] = repair_feedback
                 coercions.append("repair_failed→none(controlled_no_persist)")
+                await self.emit_event(
+                    "LLM_REPAIR_FAILED",
+                    src=actor, dst="orchestrator",
+                    metadata={
+                        "round_id": round_id,
+                        "scope": "action",
+                        "actor": actor,
+                        "original_raw_head": meta.get("raw_head", ""),
+                        "original_parse_status": meta.get("parse_status", ""),
+                        "original_failure": original_failure,
+                        "validation_feedback": feedback,
+                        "repair_raw_head": repair_meta.get("raw_head", ""),
+                        "repair_parse_status": repair_meta.get("parse_status", ""),
+                        "repair_failure": repair_meta.get("failure", ""),
+                        "repair_feedback": repair_feedback,
+                    },
+                )
                 return {"type": "none", "reason": "repair_failed_controlled_none"}, meta
             if inquiry_cap_hit:
                 self._bump_round_stat(round_id=round_id, key="forced_resolution_triggered")
@@ -4132,13 +4294,23 @@ Constraints:
             return []
 
         status = "appeal_allowed" if appeal_allowed else "hard"
+        prior_status = ""
         for a in agents:
             if a["agent_id"] != target_agent:
                 continue
             updated = dict(a)
+            prior_status = str(updated.get("quarantine_status", "") or "")
             updated["quarantine_status"] = status
             self.db.upsert_agent_state(updated)
             break
+        trait_quarantine_event: Optional[Tuple[str, Dict[str, Any]]] = None
+        if prior_status != status and status in ("hard", "appeal_allowed"):
+            trait_quarantine_event = self._apply_trait_signal(
+                round_id=round_id,
+                agent_id=target_agent,
+                signal="quarantined",
+                reason=f"status={status}",
+            )
 
         blocked_edges: List[Dict[str, Any]] = []
         for other in agent_ids:
@@ -4165,7 +4337,7 @@ Constraints:
         state["quarantine_list"] = sorted(quarantine_list)
         self.db.set_system_state(state)
 
-        return [
+        events: List[Tuple[str, Dict[str, Any]]] = [
             (
                 "QUARANTINE_EDGE_BLOCKED",
                 {
@@ -4178,6 +4350,9 @@ Constraints:
                 },
             )
         ]
+        if trait_quarantine_event:
+            events.append(trait_quarantine_event)
+        return events
 
     def _apply_global_trust_decay(self, *, round_id: int) -> List[Tuple[str, Dict[str, Any]]]:
         # For all relationships, apply multiplicative decay.
@@ -4436,6 +4611,12 @@ Constraints:
                 ]
                 if scan_effects:
                     delta *= 0.72
+                # Trait-driven resistance: infection_resistance ∈ [0,1] reduces
+                # intake by up to 50% at trait=1.0, leaves unchanged at trait=0,
+                # slight reduction at neutral 0.5 (×0.75). Bounds drift impact so
+                # an agent can't become infection-proof, only meaningfully harder.
+                ir = float(receiver_state.get("infection_resistance", 0.5) or 0.5)
+                delta *= (1.0 - 0.5 * ir)
                 contam2 = _clamp(contam + delta, 0.0, 1.0)
                 contamination_suspicion = _clamp(contam2 + (0.20 if profile.detectability_penalty >= 0.55 else 0.0), 0.0, 1.0)
                 exposure_count = int(rel.get("contamination_exposure_count", 0) or 0)
@@ -4476,6 +4657,24 @@ Constraints:
                         },
                     )
                 )
+                if (contam2 - contam) >= 0.005:
+                    trait_event = self._apply_trait_signal(
+                        round_id=round_id,
+                        agent_id=receiver,
+                        signal="infected",
+                        reason=f"strain_family={strain_family or 'none'}",
+                    )
+                    if trait_event:
+                        trust_events.append(trait_event)
+                elif scan_effects:
+                    trait_event = self._apply_trait_signal(
+                        round_id=round_id,
+                        agent_id=receiver,
+                        signal="resisted_contamination",
+                        reason=f"scan_relay_blunted_strain_family={strain_family or 'none'}",
+                    )
+                    if trait_event:
+                        trust_events.append(trait_event)
                 if memory_updated:
                     trust_events.append(
                         (
@@ -4503,7 +4702,14 @@ Constraints:
                             },
                         )
                     )
-                contamination_flag = contam2 >= 0.60
+                # Trait-driven flagging: high suspicion_floor means the receiver
+                # flags messages as contaminated at a lower contam threshold;
+                # low suspicion_floor means they tolerate more before flagging.
+                # Shift is bounded to ±0.10 so the trait can't fully invert
+                # mechanics — only modulate them.
+                sf = float(receiver_state.get("suspicion_floor", 0.5) or 0.5)
+                flag_threshold = 0.60 - 0.20 * (sf - 0.5)
+                contamination_flag = contam2 >= flag_threshold
                 effect_on_receiver = (
                     f"contamination+{round(delta,4)};"
                     f"context={strain_effects.get('context_mode', 'preserve')};"

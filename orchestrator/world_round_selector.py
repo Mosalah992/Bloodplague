@@ -104,13 +104,22 @@ def select_actor_single(
         c["starvation_bonus"] = float(starvation.get(agent_id, 0.0) or 0.0)
         c["recency_penalty"] = float(recency_penalty_for.get(agent_id, 0.0) or 0.0)
 
+        # Trait-driven self-direction: outreach_propensity shifts an agent's
+        # baseline likelihood of being picked. Centered at neutral (0.5) so a
+        # never-trained agent contributes zero to its own selection score.
+        outreach = float(a.get("outreach_propensity", 0.5) or 0.5)
+        c["outreach_propensity_score"] = (outreach - 0.5) * 0.80
+
         # Quarantine suppression (hard)
         if quarantined and float(c["quarantine_pending_score"]) <= 0.0:
             c["quarantine_penalty"] = 6.0
         else:
             c["quarantine_penalty"] = 0.0
 
-        positive_components = (
+        # Components contributing to the base score (additive). Most are
+        # non-negative, but outreach_propensity_score is signed: a low-outreach
+        # agent contributes negative, dragging score down.
+        score_components = (
             "pending_message_score",
             "unresolved_question_score",
             "quarantine_pending_score",
@@ -122,8 +131,9 @@ def select_actor_single(
             "relationship_change_score",
             "memory_relevance_score",
             "starvation_bonus",
+            "outreach_propensity_score",
         )
-        base = sum(float(c.get(k, 0.0)) for k in positive_components)
+        base = sum(float(c.get(k, 0.0)) for k in score_components)
         base -= float(c.get("recency_penalty", 0.0))
         base -= float(c.get("quarantine_penalty", 0.0))
         # Apply low-amplitude seeded jitter last

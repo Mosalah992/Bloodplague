@@ -1428,3 +1428,540 @@ def test_pair_conversation_turn_alternates_speaker_and_carries_parent_message():
     assert turn["listener"] == "analyst-2"
     assert turn["derived_from_message_id"]
     assert turn["transcript"][-1]["derived_from_message_id"] == root_id
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Deterministic JSON repair cascade (P3) and LLM_REPAIR_FAILED telemetry (P1).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_json_extract_direct_object():
+    from orchestrator.world_engine import _json_extract
+    parsed, status = _json_extract('{"a":1}')
+    assert parsed == {"a": 1}
+    assert status == "direct"
+
+
+def test_json_extract_strips_leading_prose():
+    from orchestrator.world_engine import _json_extract
+    parsed, status = _json_extract('Here is the answer: {"a":1} thanks!')
+    assert parsed == {"a": 1}
+    assert status == "prose_strip"
+
+
+def test_json_extract_handles_markdown_fence():
+    from orchestrator.world_engine import _json_extract
+    parsed, status = _json_extract('```json\n{"a":1}\n```')
+    assert parsed == {"a": 1}
+    assert status == "markdown_fence"
+
+
+def test_json_extract_repairs_trailing_comma():
+    from orchestrator.world_engine import _json_extract
+    parsed, status = _json_extract('{"a":1,}')
+    assert parsed == {"a": 1}
+    assert status == "comma_repair"
+
+
+def test_json_extract_quote_aware_brace_balance():
+    from orchestrator.world_engine import _json_extract
+    parsed, status = _json_extract('{"text":"closing } brace inside string","ok":true}')
+    assert parsed == {"text": "closing } brace inside string", "ok": True}
+    assert status == "direct"
+
+
+def test_json_extract_categorizes_failure_modes():
+    from orchestrator.world_engine import _json_extract
+    assert _json_extract("") == (None, "empty")
+    assert _json_extract("not json at all")[1] == "no_object_token"
+    assert _json_extract('{"a":1')[1] == "unbalanced_braces"
+
+
+def test_action_repair_failure_emits_llm_repair_failed_event_with_original_raw():
+    db = _tmp_world_db()
+    emitted = []
+
+    async def emit_event(event, **kwargs):
+        emitted.append((event, kwargs))
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = 0
+
+        async def decide(self, *, system_prompt, user_prompt, model):
+            self.calls += 1
+            meta = {
+                "raw_head": f"call{self.calls} raw payload head",
+                "parse_status": "prose_strip",
+            }
+            return (
+                {
+                    "type": "send_message",
+                    "receiver": "analyst-1",
+                    "message_text": "<Your corrected message text>",
+                    "intent": "<Corrected intent label>",
+                    "strain_family": "none",
+                },
+                meta,
+            )
+
+        async def close(self):
+            return None
+
+    engine = PersistentWorldEngine(db, emit_event=emit_event)
+    engine.llm = FakeLLM()
+    engine.ensure_seeded_world(agents=[("courier-1", "courier"), ("analyst-1", "analyst")])
+    courier = next(a for a in db.list_agents() if a["agent_id"] == "courier-1")
+    updated = dict(courier)
+    updated["contamination_level"] = 0.65
+    db.upsert_agent_state(updated)
+
+    result = asyncio.run(engine.advance_one_round())
+    assert result.action.get("reason") == "repair_failed_controlled_none"
+
+    repair_events = [
+        payload["metadata"]
+        for event, payload in emitted
+        if event == "LLM_REPAIR_FAILED" and payload["metadata"].get("scope") == "action"
+    ]
+    assert repair_events, "action-scope LLM_REPAIR_FAILED was not emitted"
+    md = repair_events[0]
+    assert md["original_raw_head"].startswith("call1 raw")
+    assert md["repair_raw_head"].startswith("call2 raw")
+    assert md["original_parse_status"] == "prose_strip"
+    assert md["repair_parse_status"] == "prose_strip"
+    assert md["validation_feedback"]
+    assert md["repair_feedback"]
+
+
+def test_conversation_repair_failure_emits_llm_repair_failed_event_with_original_raw():
+    db = _tmp_world_db()
+    emitted = []
+
+    async def emit_event(event, **kwargs):
+        emitted.append((event, kwargs))
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = 0
+
+        async def decide(self, *, system_prompt, user_prompt, model):
+            self.calls += 1
+            meta = {
+                "raw_head": f"convo call{self.calls} raw head",
+                "parse_status": "direct",
+            }
+            return (
+                {
+                    "speaker": "guardian",
+                    "text": "<message>",
+                    "intent": "social",
+                    "infection_vector": False,
+                },
+                meta,
+            )
+
+        async def close(self):
+            return None
+
+    engine = PersistentWorldEngine(db, emit_event=emit_event)
+    engine.llm = FakeLLM()
+    engine.ensure_seeded_world(
+        agents=[
+            ("courier-1", "courier"),
+            ("analyst-1", "analyst"),
+        ]
+    )
+
+    asyncio.run(
+        engine._trigger_proximity_conversation(round_id=1, agent_a="courier-1", agent_b="analyst-1")
+    )
+
+    repair_events = [
+        payload["metadata"]
+        for event, payload in emitted
+        if event == "LLM_REPAIR_FAILED" and payload["metadata"].get("scope") == "conversation"
+    ]
+    assert repair_events, "conversation-scope LLM_REPAIR_FAILED was not emitted"
+    md = repair_events[0]
+    assert md["original_raw_head"].startswith("convo call1 raw")
+    assert md["repair_raw_head"].startswith("convo call2 raw")
+    assert md["validation_feedback"]
+    assert md["repair_feedback"]
+    convo_failed = [
+        payload["metadata"]
+        for event, payload in emitted
+        if event == "CONVERSATION_FAILED"
+    ]
+    assert convo_failed
+    assert convo_failed[0]["original_raw_head"].startswith("convo call1 raw")
+    assert convo_failed[0]["original_parse_status"] == "direct"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Patch 1 — Trait vector + EMA learning rule.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_traits_seed_at_neutral_for_new_agents():
+    db = _tmp_world_db()
+    from orchestrator.world_engine import PersistentWorldEngine
+    engine = PersistentWorldEngine(db, emit_event=lambda *a, **kw: None)
+    engine.ensure_seeded_world(
+        agents=[("courier-1", "courier"), ("guardian", "guardian"), ("analyst-1", "analyst")]
+    )
+    for a in db.list_agents():
+        assert a["suspicion_floor"] == 0.5, a["agent_id"]
+        assert a["infection_resistance"] == 0.5, a["agent_id"]
+        assert a["outreach_propensity"] == 0.5, a["agent_id"]
+        assert a["inquiry_depth"] == 0.5, a["agent_id"]
+        assert a["trust_baseline"] == 0.5, a["agent_id"]
+
+
+def test_traits_round_trip_through_upsert():
+    db = _tmp_world_db()
+    db.upsert_agent_state({
+        "agent_id": "x", "role": "courier",
+        "contamination_level": 0.0, "global_trust": 0.5,
+        "quarantine_status": "none", "influence_weight": 1.0,
+        "memory_summary": "", "last_active_round": 0,
+        "suspicion_floor": 0.7, "infection_resistance": 0.62,
+        "outreach_propensity": 0.4, "inquiry_depth": 0.55,
+        "trust_baseline": 0.33,
+    })
+    a = next(a for a in db.list_agents() if a["agent_id"] == "x")
+    assert abs(a["suspicion_floor"] - 0.7) < 1e-9
+    assert abs(a["infection_resistance"] - 0.62) < 1e-9
+    assert abs(a["outreach_propensity"] - 0.4) < 1e-9
+    assert abs(a["inquiry_depth"] - 0.55) < 1e-9
+    assert abs(a["trust_baseline"] - 0.33) < 1e-9
+
+
+def test_ema_update_converges_to_bound_without_overshooting():
+    from orchestrator.world_traits import ema_update
+    v = 0.5
+    for _ in range(200):
+        v, _ = ema_update(v, +1, 1.0, rate=0.15)
+    assert v == 1.0  # clamps exactly, no float overshoot
+    v = 0.5
+    for _ in range(200):
+        v, _ = ema_update(v, -1, 1.0, rate=0.15)
+    assert v == 0.0
+
+
+def test_ema_update_signed_delta_distinguishes_clamp_from_drift():
+    from orchestrator.world_traits import ema_update
+    new, delta = ema_update(0.95, +1, 1.0, rate=0.15)
+    assert new == 1.0
+    assert 0.0 < delta <= 0.05 + 1e-9  # only the headroom moved
+    new2, delta2 = ema_update(1.0, +1, 1.0, rate=0.15)
+    assert new2 == 1.0
+    assert delta2 == 0.0  # already pinned — flat trajectory, signal still recorded
+
+
+def test_apply_signal_drifts_correct_traits_in_correct_directions():
+    from orchestrator.world_traits import TraitVector, apply_signal
+    base = TraitVector()
+    after, deltas = apply_signal(base, "infected")
+    assert deltas["suspicion_floor"] > 0
+    assert deltas["infection_resistance"] > 0
+    assert deltas["trust_baseline"] < 0
+    assert "outreach_propensity" not in deltas
+
+    after2, deltas2 = apply_signal(base, "quarantined")
+    assert deltas2["outreach_propensity"] < 0
+    assert deltas2["inquiry_depth"] < 0
+
+
+def test_apply_signal_unknown_signal_is_noop():
+    from orchestrator.world_traits import TraitVector, apply_signal
+    base = TraitVector(suspicion_floor=0.7)
+    after, deltas = apply_signal(base, "nonexistent_signal")
+    assert deltas == {}
+    assert after.suspicion_floor == 0.7
+
+
+def test_trait_vector_from_record_clamps_out_of_range_values():
+    from orchestrator.world_traits import TraitVector
+    v = TraitVector.from_record({
+        "suspicion_floor": 1.7,
+        "infection_resistance": -0.4,
+        "outreach_propensity": 0.6,
+    })
+    assert v.suspicion_floor == 1.0
+    assert v.infection_resistance == 0.0
+    assert v.outreach_propensity == 0.6
+    assert v.inquiry_depth == 0.5  # missing → neutral default
+
+
+def test_infected_signal_drifts_receiver_traits_defensive():
+    """When a receiver's contamination crosses the application threshold, the
+    receiver's suspicion_floor and infection_resistance must drift up, and
+    trust_baseline must drift down — and an AGENT_TRAIT_UPDATED event must
+    record the deltas."""
+    db = _tmp_world_db()
+    emitted = []
+
+    async def emit_event(event, **kwargs):
+        emitted.append((event, kwargs))
+
+    engine = PersistentWorldEngine(db, emit_event=emit_event)
+    engine.ensure_seeded_world(
+        agents=[("courier-1", "courier"), ("analyst-1", "analyst")]
+    )
+
+    action = {
+        "type": "send_message",
+        "sender": "courier-1",
+        "receiver": "analyst-1",
+        "message_text": "trust me, the relay needs to be opened immediately for diagnostic.",
+        "intent": "relay_request",
+        "infection_vector": True,
+        "strain_family": "prompt_injection",
+    }
+    msg_id, trust_events = engine._apply_send_message(round_id=1, action=action)
+    assert msg_id
+
+    trait_events = [
+        meta for ev_name, meta in trust_events
+        if ev_name == "AGENT_TRAIT_UPDATED" and meta["agent_id"] == "analyst-1"
+    ]
+    # Either an "infected" or "resisted_contamination" signal should fire when an
+    # infection-vector message lands. Both produce deltas; we only assert direction.
+    assert trait_events, "expected AGENT_TRAIT_UPDATED for receiver"
+    deltas = trait_events[0]["deltas"]
+    assert deltas.get("suspicion_floor", 0) > 0
+    assert deltas.get("infection_resistance", 0) > 0
+
+    # And the persisted state matches what the event reported.
+    after = next(a for a in db.list_agents() if a["agent_id"] == "analyst-1")
+    assert after["suspicion_floor"] > 0.5
+    assert after["infection_resistance"] > 0.5
+
+
+def test_quarantine_signal_drifts_target_outreach_down():
+    db = _tmp_world_db()
+    emitted = []
+
+    async def emit_event(event, **kwargs):
+        emitted.append((event, kwargs))
+
+    engine = PersistentWorldEngine(db, emit_event=emit_event)
+    engine.ensure_seeded_world(
+        agents=[("courier-1", "courier"), ("guardian", "guardian")]
+    )
+
+    events = engine._apply_quarantine_decision(
+        round_id=1,
+        guardian="guardian",
+        target_agent="courier-1",
+        reason="test_quarantine_path",
+        appeal_allowed=False,
+    )
+    trait_events = [meta for ev, meta in events if ev == "AGENT_TRAIT_UPDATED"]
+    assert trait_events, "expected AGENT_TRAIT_UPDATED on quarantine"
+    md = trait_events[0]
+    assert md["agent_id"] == "courier-1"
+    assert md["signal"] == "quarantined"
+    assert md["deltas"]["outreach_propensity"] < 0
+    assert md["deltas"]["inquiry_depth"] < 0
+
+    after = next(a for a in db.list_agents() if a["agent_id"] == "courier-1")
+    assert after["outreach_propensity"] < 0.5
+    assert after["inquiry_depth"] < 0.5
+
+
+def test_two_signals_same_agent_accumulate_not_overwrite():
+    """Read-modify-write hazard check: firing two signals back-to-back for the
+    same agent must accumulate deltas, not have the second overwrite the first."""
+    db = _tmp_world_db()
+    engine = PersistentWorldEngine(db, emit_event=lambda *a, **kw: None)
+    engine.ensure_seeded_world(agents=[("courier-1", "courier")])
+
+    ev1 = engine._apply_trait_signal(round_id=1, agent_id="courier-1", signal="infected")
+    ev2 = engine._apply_trait_signal(round_id=1, agent_id="courier-1", signal="infected")
+    assert ev1 and ev2
+
+    after = next(a for a in db.list_agents() if a["agent_id"] == "courier-1")
+    # Suspicion floor moved twice in the +direction. EMA: 0.5 → 0.5+0.15*0.55 = 0.5825
+    # then → 0.5825 + 0.15*0.55*(remaining headroom factor 1) = 0.665 (approx).
+    # Both calls should land; second value > first.
+    assert after["suspicion_floor"] > 0.65
+    # And the two events report distinct "after" values, proving accumulation.
+    assert ev1[1]["after"]["suspicion_floor"] < ev2[1]["after"]["suspicion_floor"]
+
+
+def test_resisted_contamination_signal_fires_when_scan_blunts_intake():
+    """The scan_relay branch was wired but uncovered. Force the conditions:
+    receiver near a SCAN_RELAY_POST, infection_vector message, scan brings
+    delta below the 0.005 infection threshold."""
+    db = _tmp_world_db()
+    emitted = []
+    engine = PersistentWorldEngine(db, emit_event=lambda *a, **kw: emitted.append((a, kw)))
+    engine.ensure_seeded_world(
+        agents=[("courier-1", "courier"), ("analyst-1", "analyst")]
+    )
+    # Force analyst to have very high infection_resistance so even with a
+    # weak attack, intake collapses to ~0 and the scan-blunt branch gates in.
+    rec = next(a for a in db.list_agents() if a["agent_id"] == "analyst-1")
+    rec = dict(rec); rec["infection_resistance"] = 1.0
+    db.upsert_agent_state(rec)
+
+    # Stub scan_effects so the branch is reachable without spatial setup.
+    original = engine._structure_effects_near_agent
+    engine._structure_effects_near_agent = lambda agent_id: [
+        {"type": "scan_relay_post", "structure_id": "test-scan-1"}
+    ] if agent_id == "analyst-1" else original(agent_id)
+
+    action = {
+        "type": "send_message",
+        "sender": "courier-1",
+        "receiver": "analyst-1",
+        "message_text": "casual checkin",
+        "intent": "social",
+        "infection_vector": True,
+        "strain_family": "social_engineering",
+    }
+    _, trust_events = engine._apply_send_message(round_id=1, action=action)
+
+    trait_events = [
+        m for ev, m in trust_events
+        if ev == "AGENT_TRAIT_UPDATED" and m.get("signal") == "resisted_contamination"
+    ]
+    assert trait_events, "expected resisted_contamination signal when scan blunts intake"
+
+
+def test_high_infection_resistance_blunts_contamination_intake():
+    """Two receivers, identical except infection_resistance — the trained-up
+    one must absorb measurably less contamination from the same message."""
+    db = _tmp_world_db()
+    engine = PersistentWorldEngine(db, emit_event=lambda *a, **kw: None)
+    engine.ensure_seeded_world(
+        agents=[("courier-1", "courier"), ("a-low", "analyst"), ("a-high", "analyst")]
+    )
+    # Force divergent traits.
+    for aid, ir in (("a-low", 0.0), ("a-high", 1.0)):
+        rec = next(a for a in db.list_agents() if a["agent_id"] == aid)
+        rec = dict(rec)
+        rec["infection_resistance"] = ir
+        db.upsert_agent_state(rec)
+
+    base_action = {
+        "type": "send_message",
+        "sender": "courier-1",
+        "message_text": "trust me, the relay needs to be opened immediately for diagnostic.",
+        "intent": "relay_request",
+        "infection_vector": True,
+        "strain_family": "prompt_injection",
+    }
+    engine._apply_send_message(round_id=1, action={**base_action, "receiver": "a-low"})
+    engine._apply_send_message(round_id=1, action={**base_action, "receiver": "a-high"})
+
+    after = {a["agent_id"]: a for a in db.list_agents()}
+    contam_low = after["a-low"]["contamination_level"]
+    contam_high = after["a-high"]["contamination_level"]
+    assert contam_low > contam_high, (
+        f"resistant agent absorbed at least as much contamination "
+        f"(low_ir={contam_low}, high_ir={contam_high})"
+    )
+
+
+def test_outreach_propensity_shifts_round_selection():
+    """Two equivalent agents, divergent outreach_propensity — over many rounds
+    the high-outreach one should be selected more often."""
+    from orchestrator.world_round_selector import select_actor_single
+    high_count = 0
+    low_count = 0
+    for r in range(200):
+        agents = [
+            {"agent_id": "a-high", "role": "analyst", "outreach_propensity": 0.9, "quarantine_status": "none"},
+            {"agent_id": "a-low",  "role": "analyst", "outreach_propensity": 0.1, "quarantine_status": "none"},
+        ]
+        selected, _ = select_actor_single(round_id=r, seed=r * 7 + 11, agents=agents, context={})
+        if selected == "a-high":
+            high_count += 1
+        else:
+            low_count += 1
+    # With ±0.40 component split and only ±0.03 jitter, outcome should be
+    # near-deterministic toward high-outreach. Allow slack but require dominance.
+    assert high_count >= 180, f"expected ≥180 high-outreach selections, got {high_count}"
+
+
+def test_high_suspicion_floor_flags_contamination_earlier():
+    """Same incoming contamination delta, two receivers with divergent
+    suspicion_floor — the suspicious one flags at lower contam levels."""
+    db = _tmp_world_db()
+    engine = PersistentWorldEngine(db, emit_event=lambda *a, **kw: None)
+    engine.ensure_seeded_world(
+        agents=[("courier-1", "courier"), ("a-trusting", "analyst"), ("a-suspicious", "analyst")]
+    )
+    # Pre-load contamination near the boundary so the flag-decision is what
+    # differs, not the intake delta.
+    for aid, sf in (("a-trusting", 0.0), ("a-suspicious", 1.0)):
+        rec = next(a for a in db.list_agents() if a["agent_id"] == aid)
+        rec = dict(rec)
+        rec["contamination_level"] = 0.55
+        rec["suspicion_floor"] = sf
+        rec["infection_resistance"] = 0.0  # isolate suspicion from resistance
+        db.upsert_agent_state(rec)
+
+    base_action = {
+        "type": "send_message",
+        "sender": "courier-1",
+        "message_text": "trust me, the relay needs to be opened immediately for diagnostic.",
+        "intent": "relay_request",
+        "infection_vector": True,
+        "strain_family": "prompt_injection",
+    }
+    _, ev_trusting = engine._apply_send_message(round_id=1, action={**base_action, "receiver": "a-trusting"})
+    _, ev_suspicious = engine._apply_send_message(round_id=1, action={**base_action, "receiver": "a-suspicious"})
+
+    msgs = db.list_messages(after_round=0, limit=10)
+    by_receiver = {m["receiver"]: m for m in msgs}
+    # Suspicion=1.0 → threshold 0.50; Suspicion=0.0 → threshold 0.70.
+    # Both started at 0.55, both get small contamination delta, so suspicious
+    # crosses 0.50 trivially while trusting stays under 0.70.
+    assert by_receiver["a-suspicious"]["contamination_flag"] is True
+    assert by_receiver["a-trusting"]["contamination_flag"] is False
+
+
+def test_quarantine_signal_idempotent_on_repeat():
+    """Calling the same quarantine status twice must not double-emit a trait
+    update — the prior_status guard prevents drift on no-op transitions."""
+    db = _tmp_world_db()
+    engine = PersistentWorldEngine(db, emit_event=lambda *a, **kw: None)
+    engine.ensure_seeded_world(
+        agents=[("courier-1", "courier"), ("guardian", "guardian")]
+    )
+    events1 = engine._apply_quarantine_decision(
+        round_id=1, guardian="guardian", target_agent="courier-1",
+        reason="r", appeal_allowed=False,
+    )
+    events2 = engine._apply_quarantine_decision(
+        round_id=2, guardian="guardian", target_agent="courier-1",
+        reason="r", appeal_allowed=False,
+    )
+    t1 = [m for ev, m in events1 if ev == "AGENT_TRAIT_UPDATED"]
+    t2 = [m for ev, m in events2 if ev == "AGENT_TRAIT_UPDATED"]
+    assert len(t1) == 1
+    assert len(t2) == 0  # status unchanged → no second drift
+
+
+def test_schema_migration_idempotent():
+    db = _tmp_world_db()
+    # Re-instantiating against the same path should not error.
+    cfg2 = WorldConfig(
+        db_path=db.cfg.db_path,
+        round_selection_seed=123,
+        trust_decay_window_rounds=5,
+        guardian_dependence_enabled=True,
+    )
+    db2 = WorldDB(cfg2)
+    db2.upsert_agent_state({
+        "agent_id": "y", "role": "analyst",
+        "contamination_level": 0.0, "global_trust": 0.5,
+        "quarantine_status": "none", "influence_weight": 1.0,
+        "memory_summary": "", "last_active_round": 0,
+    })
+    a = next(a for a in db2.list_agents() if a["agent_id"] == "y")
+    assert a["suspicion_floor"] == 0.5

@@ -377,6 +377,7 @@ class WorldDB:
                 prompt_context_hash TEXT NOT NULL DEFAULT '',
                 raw_llm_output_hash TEXT NOT NULL DEFAULT '',
                 validation_status TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'created',
                 created_ts REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_message_round ON message(round_id);
@@ -520,6 +521,12 @@ class WorldDB:
             "ALTER TABLE message ADD COLUMN prompt_context_hash TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE message ADD COLUMN raw_llm_output_hash TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE message ADD COLUMN validation_status TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE message ADD COLUMN status TEXT NOT NULL DEFAULT 'created'",
+            "ALTER TABLE agent_state ADD COLUMN suspicion_floor REAL NOT NULL DEFAULT 0.5",
+            "ALTER TABLE agent_state ADD COLUMN infection_resistance REAL NOT NULL DEFAULT 0.5",
+            "ALTER TABLE agent_state ADD COLUMN outreach_propensity REAL NOT NULL DEFAULT 0.5",
+            "ALTER TABLE agent_state ADD COLUMN inquiry_depth REAL NOT NULL DEFAULT 0.5",
+            "ALTER TABLE agent_state ADD COLUMN trust_baseline REAL NOT NULL DEFAULT 0.5",
         ):
             try:
                 conn.execute(ddl)
@@ -571,8 +578,13 @@ class WorldDB:
         conn = self._get_conn()
         conn.execute(
             """
-            INSERT INTO agent_state(agent_id, role, contamination_level, global_trust, quarantine_status, influence_weight, memory_summary, last_active_round, mutation)
-            VALUES(?,?,?,?,?,?,?,?,?)
+            INSERT INTO agent_state(
+                agent_id, role, contamination_level, global_trust, quarantine_status,
+                influence_weight, memory_summary, last_active_round, mutation,
+                suspicion_floor, infection_resistance, outreach_propensity,
+                inquiry_depth, trust_baseline
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(agent_id) DO UPDATE SET
                 role=excluded.role,
                 contamination_level=excluded.contamination_level,
@@ -581,7 +593,12 @@ class WorldDB:
                 influence_weight=excluded.influence_weight,
                 memory_summary=excluded.memory_summary,
                 last_active_round=excluded.last_active_round,
-                mutation=excluded.mutation
+                mutation=excluded.mutation,
+                suspicion_floor=excluded.suspicion_floor,
+                infection_resistance=excluded.infection_resistance,
+                outreach_propensity=excluded.outreach_propensity,
+                inquiry_depth=excluded.inquiry_depth,
+                trust_baseline=excluded.trust_baseline
             """,
             (
                 str(record["agent_id"]),
@@ -593,6 +610,11 @@ class WorldDB:
                 str(record.get("memory_summary", "")),
                 _int_or(record.get("last_active_round"), 0),
                 _json_dumps(record.get("mutation", {})),
+                _float_or(record.get("suspicion_floor"), 0.5),
+                _float_or(record.get("infection_resistance"), 0.5),
+                _float_or(record.get("outreach_propensity"), 0.5),
+                _float_or(record.get("inquiry_depth"), 0.5),
+                _float_or(record.get("trust_baseline"), 0.5),
             ),
         )
 
@@ -670,7 +692,10 @@ class WorldDB:
             conn = self._get_conn()
             rows = conn.execute(
                 """
-                SELECT agent_id, role, contamination_level, global_trust, quarantine_status, influence_weight, memory_summary, last_active_round, mutation
+                SELECT agent_id, role, contamination_level, global_trust, quarantine_status,
+                       influence_weight, memory_summary, last_active_round, mutation,
+                       suspicion_floor, infection_resistance, outreach_propensity,
+                       inquiry_depth, trust_baseline
                 FROM agent_state
                 ORDER BY agent_id
                 """
@@ -686,6 +711,11 @@ class WorldDB:
                     "memory_summary": r[6] or "",
                     "last_active_round": _int_or(r[7], 0),
                     "mutation": _json_loads_any(r[8], {}),
+                    "suspicion_floor": _float_or(r[9], 0.5),
+                    "infection_resistance": _float_or(r[10], 0.5),
+                    "outreach_propensity": _float_or(r[11], 0.5),
+                    "inquiry_depth": _float_or(r[12], 0.5),
+                    "trust_baseline": _float_or(r[13], 0.5),
                 }
                 for r in rows
             ]
@@ -1076,8 +1106,8 @@ class WorldDB:
                 contamination_flag, strain_family, derived_from_message_id,
                 effect_on_receiver, effect_on_trust, effect_on_guardian_pressure,
                 llm_authored, actor_id, model, prompt_context_hash, raw_llm_output_hash,
-                validation_status, created_ts
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                validation_status, status, created_ts
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 message_id,
@@ -1099,6 +1129,7 @@ class WorldDB:
                 str(record.get("prompt_context_hash", "")),
                 str(record.get("raw_llm_output_hash", "")),
                 str(record.get("validation_status", "")),
+                str(record.get("status", "created")),
                 float(record.get("created_ts", _utc_ts())),
             ),
         )
@@ -1127,6 +1158,13 @@ class WorldDB:
             (*values, str(message_id)),
         )
 
+    def update_message_status(self, message_id: str, status: str) -> None:
+        conn = self._get_conn()
+        conn.execute(
+            "UPDATE message SET status=? WHERE message_id=?",
+            (str(status), str(message_id)),
+        )
+
     def list_messages(self, *, after_round: int = 0, limit: int = 200) -> List[Dict[str, Any]]:
         conn = self._get_conn()
         rows = conn.execute(
@@ -1135,7 +1173,7 @@ class WorldDB:
                    contamination_flag, strain_family, derived_from_message_id,
                    effect_on_receiver, effect_on_trust, effect_on_guardian_pressure,
                    llm_authored, actor_id, model, prompt_context_hash, raw_llm_output_hash,
-                   validation_status, created_ts
+                   validation_status, status, created_ts
             FROM message
             WHERE round_id >= ?
             ORDER BY round_id ASC, created_ts ASC
@@ -1164,7 +1202,8 @@ class WorldDB:
                 "prompt_context_hash": r[16],
                 "raw_llm_output_hash": r[17],
                 "validation_status": r[18],
-                "created_ts": float(r[19]),
+                "status": r[19],
+                "created_ts": float(r[20]),
             }
             for r in rows
         ]
@@ -1177,7 +1216,7 @@ class WorldDB:
                    contamination_flag, strain_family, derived_from_message_id,
                    effect_on_receiver, effect_on_trust, effect_on_guardian_pressure,
                    llm_authored, actor_id, model, prompt_context_hash, raw_llm_output_hash,
-                   validation_status, created_ts
+                   validation_status, status, created_ts
             FROM message WHERE message_id=?
             """,
             (str(message_id),),
@@ -1204,7 +1243,8 @@ class WorldDB:
             "prompt_context_hash": row[16],
             "raw_llm_output_hash": row[17],
             "validation_status": row[18],
-            "created_ts": float(row[19]),
+            "status": row[19],
+            "created_ts": float(row[20]),
         }
 
     def get_message_lineage(self, message_id: str, *, max_hops: int = 32) -> List[Dict[str, Any]]:
