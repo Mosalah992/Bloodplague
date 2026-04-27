@@ -383,7 +383,7 @@ ollama pull dolphin-mistral:latest
 ### Start the stack
 
 ```powershell
-cd "E:\CODE PROKECTS\Epidemic_Lab"
+cd"USER\Epidemic_Lab"
 docker compose build
 docker compose up -d
 ```
